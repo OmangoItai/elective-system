@@ -1,0 +1,58 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-elective}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-elective}
+    volumes: [elective-postgres-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes: [elective-redis-data:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  migrate:
+    image: ${ELECTIVE_IMAGE:?Set immutable ELECTIVE_IMAGE in .env}
+    environment: &application-env
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-elective}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-elective}
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres: { condition: service_healthy }
+    command: ["./node_modules/.bin/tsx", "src/db/migrate.ts"]
+
+  app:
+    image: ${ELECTIVE_IMAGE:?Set immutable ELECTIVE_IMAGE in .env}
+    restart: unless-stopped
+    ports: ["8080:8080"]
+    environment:
+      <<: *application-env
+      SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET in .env}
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+
+  worker:
+    image: ${ELECTIVE_IMAGE:?Set immutable ELECTIVE_IMAGE in .env}
+    restart: unless-stopped
+    environment: *application-env
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    command: ["./node_modules/.bin/tsx", "src/workers/selection.ts"]
+
+volumes:
+  elective-postgres-data:
+  elective-redis-data:

@@ -1,5 +1,5 @@
 import { Router, Request, Response } from "express";
-import { eq, sql, inArray, count } from "drizzle-orm";
+import { eq, count, inArray } from "drizzle-orm";
 import { db } from "../db/index";
 import { courses, access, accessUsers, selections, config } from "../db/schema";
 import { requireAdmin } from "../middleware/auth";
@@ -36,240 +36,263 @@ function parseAllowedGradesInput(raw: unknown): { ok: true; value: string | null
 
 class CourseCapacityError extends Error {}
 
-router.get("/admin/courses", requireAdmin, (_req: Request, res: Response) => {
-  const endTime = readEndTime(db);
-  const startTime = readStartTime(db);
-  const siteTitleRow = db.select({ value: config.value }).from(config).where(eq(config.key, "site_title")).get();
-  const siteTitle = siteTitleRow?.value || "选课系统";
-  const maxSelectionsRow = db.select({ value: config.value }).from(config).where(eq(config.key, "max_selections")).get();
-  const maxSelections = maxSelectionsRow?.value || "1";
-  const studentNotice = db.select({ value: config.value }).from(config).where(eq(config.key, "student_notice")).get()?.value || "";
-  const courseInstructions = db.select({ value: config.value }).from(config).where(eq(config.key, "course_instructions")).get()?.value || "";
-  const defaultOpenTime = getDefaultOpenTime();
+router.get("/admin/courses", requireAdmin, async (_req: Request, res: Response, next) => {
+  try {
+    const endTime = await readEndTime(db);
+    const startTime = await readStartTime(db);
+    const siteTitleRows = await db.select({ value: config.value }).from(config).where(eq(config.key, "site_title"));
+    const siteTitle = siteTitleRows[0]?.value || "选课系统";
+    const maxSelectionsRows = await db.select({ value: config.value }).from(config).where(eq(config.key, "max_selections"));
+    const maxSelections = maxSelectionsRows[0]?.value || "1";
+    const studentNoticeRows = await db.select({ value: config.value }).from(config).where(eq(config.key, "student_notice"));
+    const studentNotice = studentNoticeRows[0]?.value || "";
+    const courseInstructionsRows = await db.select({ value: config.value }).from(config).where(eq(config.key, "course_instructions"));
+    const courseInstructions = courseInstructionsRows[0]?.value || "";
+    const defaultOpenTime = getDefaultOpenTime();
 
-  const courseRows = db.all(
-    sql`SELECT c.id, c.name, c.teacher, c.description,
-        c.course_time as courseTime, c.location,
-        c.total_seats as totalSeats, c.available_seats as availableSeats,
-        c.open_time as openTime,
-        c.allowed_grades as allowedGrades,
-        c.tag as tag,
-        COALESCE(sc.cnt, 0) as selected_count
-        FROM courses c
-        LEFT JOIN (SELECT course_id, count(*) as cnt FROM selections GROUP BY course_id) sc
-        ON c.id = sc.course_id
-        ORDER BY c.id`
-  ) as any[];
+    const selectedCounts = await db
+      .select({ courseId: selections.courseId, count: count() })
+      .from(selections)
+      .groupBy(selections.courseId);
+    const countMap = new Map(selectedCounts.map((r) => [r.courseId, Number(r.count)]));
 
-  res.render("admin-courses", {
-    title: "课程管理",
-    courses: courseRows,
-    endTime,
-    startTime,
-    siteTitle,
-    maxSelections,
-    studentNotice,
-    courseInstructions,
-    defaultOpenTime,
-  });
+    const allCourses = await db.select().from(courses).orderBy(courses.id);
+    const courseRows = allCourses.map((c) => ({
+      ...c,
+      selected_count: countMap.get(c.id) || 0,
+    }));
+
+    res.render("admin-courses", {
+      title: "课程管理",
+      courses: courseRows,
+      endTime,
+      startTime,
+      siteTitle,
+      maxSelections,
+      studentNotice,
+      courseInstructions,
+      defaultOpenTime,
+    });
+  } catch (err) {
+    next(err);
+  }
 });
 
-router.post("/api/admin/courses", requireAdmin, (req: Request, res: Response) => {
-  const { name, teacher, description, courseTime, location, openTime, tag } = req.body;
-  const totalSeats = Number(req.body.totalSeats);
+router.post("/api/admin/courses", requireAdmin, async (req: Request, res: Response, next) => {
+  try {
+    const { name, teacher, description, courseTime, location, openTime, tag } = req.body;
+    const totalSeats = Number(req.body.totalSeats);
 
-  const errors: string[] = [];
-  if (!name || !name.trim()) errors.push("课程名称不能为空");
-  if (!teacher || !teacher.trim()) errors.push("授课教师不能为空");
-  if (!Number.isInteger(totalSeats) || totalSeats < 1) errors.push("总名额必须为大于0的整数");
-  if (!openTime || !isValidLocalDateTime(openTime)) errors.push("开放时间格式不正确");
-  let allowedGrades: string | null = null;
-  const allowed = parseAllowedGradesInput(req.body.allowedGrades);
-  if (!allowed.ok) errors.push(allowed.error);
-  else allowedGrades = allowed.value;
+    const errors: string[] = [];
+    if (!name || !name.trim()) errors.push("课程名称不能为空");
+    if (!teacher || !teacher.trim()) errors.push("授课教师不能为空");
+    if (!Number.isInteger(totalSeats) || totalSeats < 1) errors.push("总名额必须为大于0的整数");
+    if (!openTime || !isValidLocalDateTime(openTime)) errors.push("开放时间格式不正确");
+    let allowedGrades: string | null = null;
+    const allowed = parseAllowedGradesInput(req.body.allowedGrades);
+    if (!allowed.ok) errors.push(allowed.error);
+    else allowedGrades = allowed.value;
 
-  if (errors.length > 0) {
-    return res.status(400).send(errors.join("；"));
+    if (errors.length > 0) {
+      return res.status(400).send(errors.join("；"));
+    }
+
+    await db.insert(courses).values({
+      name: name.trim(),
+      teacher: teacher.trim(),
+      description: description || null,
+      courseTime: courseTime || null,
+      location: location || null,
+      totalSeats,
+      availableSeats: totalSeats,
+      openTime: normalizeStartOfDay(openTime) || nowLocal(),
+      allowedGrades,
+      tag: String(tag || "").trim() || null,
+    });
+
+    res.redirect("/admin/courses");
+  } catch (err) {
+    next(err);
   }
-
-  db.insert(courses).values({
-    name: name.trim(),
-    teacher: teacher.trim(),
-    description: description || null,
-    courseTime: courseTime || null,
-    location: location || null,
-    totalSeats,
-    availableSeats: totalSeats,
-    openTime: normalizeStartOfDay(openTime) || nowLocal(),
-    allowedGrades,
-    tag: tag && String(tag).trim() ? String(tag).trim() : null,
-  }).run();
-
-  res.redirect("/admin/courses");
 });
 
-router.put("/api/admin/courses/:id", requireAdmin, (req: Request, res: Response) => {
-  const courseId = parseRouteId(req.params.id);
-  if (courseId === null) return res.status(400).send("无效的课程ID");
-  const { name, teacher, description, courseTime, location, totalSeats, openTime, resetSeats, allowedGrades, tag } = req.body;
+router.put("/api/admin/courses/:id", requireAdmin, async (req: Request, res: Response, next) => {
+  try {
+    const courseId = parseRouteId(req.params.id);
+    if (courseId === null) return res.status(400).send("无效的课程ID");
+    const { name, teacher, description, courseTime, location, totalSeats, openTime, resetSeats, allowedGrades, tag } = req.body;
 
-  const existing = db.select().from(courses).where(eq(courses.id, courseId)).get();
-  if (!existing) return res.status(404).send("课程不存在");
+    const existingRows = await db.select().from(courses).where(eq(courses.id, courseId));
+    if (existingRows.length === 0) return res.status(404).send("课程不存在");
+    const existing = existingRows[0];
 
-  const updateData: any = {};
+    const updateData: any = {};
 
-  if (name !== undefined) {
-    if (!String(name).trim()) return res.status(400).send("课程名称不能为空");
-    updateData.name = String(name).trim();
-  }
-  if (teacher !== undefined) {
-    if (!String(teacher).trim()) return res.status(400).send("授课教师不能为空");
-    updateData.teacher = String(teacher).trim();
-  }
-  if (description !== undefined) updateData.description = description || null;
-  if (courseTime !== undefined) updateData.courseTime = courseTime || null;
-  if (location !== undefined) updateData.location = location || null;
-  if (tag !== undefined) updateData.tag = String(tag).trim() || null;
-  if (openTime !== undefined) {
-    if (openTime && !isValidLocalDateTime(openTime)) {
-      return res.status(400).send("开放时间格式不正确");
+    if (name !== undefined) {
+      if (!String(name).trim()) return res.status(400).send("课程名称不能为空");
+      updateData.name = String(name).trim();
     }
-    updateData.openTime = openTime ? normalizeStartOfDay(openTime) : openTime;
-  }
-  if (allowedGrades !== undefined) {
-    const allowed = parseAllowedGradesInput(allowedGrades);
-    if (!allowed.ok) return res.status(400).send(allowed.error);
-    updateData.allowedGrades = allowed.value;
-  }
-  let parsedTotalSeats: number | undefined;
-  if (totalSeats !== undefined) {
-    parsedTotalSeats = Number(totalSeats);
-    if (!Number.isInteger(parsedTotalSeats) || parsedTotalSeats < 1) {
-      return res.status(400).send("总名额必须为大于0的整数");
+    if (teacher !== undefined) {
+      if (!String(teacher).trim()) return res.status(400).send("授课教师不能为空");
+      updateData.teacher = String(teacher).trim();
     }
-    updateData.totalSeats = parsedTotalSeats;
-  }
-
-  const shouldResetSeats = resetSeats === "true" || resetSeats === "1";
-  let removedCount = 0;
-
-  if (Object.keys(updateData).length > 0 || shouldResetSeats) {
-    try {
-      db.transaction((tx) => {
-        let selectedCount = tx
-          .select({ count: count() })
-          .from(selections)
-          .where(eq(selections.courseId, courseId))
-          .get()?.count ?? 0;
-
-        if (allowedGrades !== undefined) {
-          const reconciled = removeIneligibleSelections(tx, courseId, updateData.allowedGrades);
-          removedCount = reconciled.removedCount;
-          selectedCount = reconciled.selectedCount;
-        }
-
-        const effectiveTotalSeats = parsedTotalSeats ?? existing.totalSeats;
-        if (effectiveTotalSeats < selectedCount) {
-          throw new CourseCapacityError(`总名额不能小于已选人数（${selectedCount}）`);
-        }
-
-        if (parsedTotalSeats !== undefined || shouldResetSeats || removedCount > 0) {
-          updateData.availableSeats = effectiveTotalSeats - selectedCount;
-        }
-
-        tx.update(courses).set(updateData).where(eq(courses.id, courseId)).run();
-      });
-    } catch (error) {
-      if (error instanceof CourseCapacityError) {
-        return res.status(400).send(error.message);
+    if (description !== undefined) updateData.description = description || null;
+    if (courseTime !== undefined) updateData.courseTime = courseTime || null;
+    if (location !== undefined) updateData.location = location || null;
+    if (tag !== undefined) updateData.tag = String(tag).trim() || null;
+    if (openTime !== undefined) {
+      if (openTime && !isValidLocalDateTime(openTime)) {
+        return res.status(400).send("开放时间格式不正确");
       }
-      throw error;
+      updateData.openTime = openTime ? normalizeStartOfDay(openTime) : openTime;
     }
-  }
+    if (allowedGrades !== undefined) {
+      const allowed = parseAllowedGradesInput(allowedGrades);
+      if (!allowed.ok) return res.status(400).send(allowed.error);
+      updateData.allowedGrades = allowed.value;
+    }
+    let parsedTotalSeats: number | undefined;
+    if (totalSeats !== undefined) {
+      parsedTotalSeats = Number(totalSeats);
+      if (!Number.isInteger(parsedTotalSeats) || parsedTotalSeats < 1) {
+        return res.status(400).send("总名额必须为大于0的整数");
+      }
+      updateData.totalSeats = parsedTotalSeats;
+    }
 
-  if (removedCount > 0) res.set("X-Removed-Selections", String(removedCount));
-  res.redirect("/admin/courses");
+    const shouldResetSeats = resetSeats === "true" || resetSeats === "1";
+    let removedCount = 0;
+
+    if (Object.keys(updateData).length > 0 || shouldResetSeats) {
+      try {
+        await db.transaction(async (tx) => {
+          const selectedCountResult = await tx
+            .select({ count: count() })
+            .from(selections)
+            .where(eq(selections.courseId, courseId));
+          let selectedCount = selectedCountResult[0].count;
+
+          if (allowedGrades !== undefined) {
+            const reconciled = await removeIneligibleSelections(tx, courseId, updateData.allowedGrades);
+            removedCount = reconciled.removedCount;
+            selectedCount = reconciled.selectedCount;
+          }
+
+          const effectiveTotalSeats = parsedTotalSeats ?? existing.totalSeats;
+          if (effectiveTotalSeats < selectedCount) {
+            throw new CourseCapacityError(`总名额不能小于已选人数（${selectedCount}）`);
+          }
+
+          if (parsedTotalSeats !== undefined || shouldResetSeats || removedCount > 0) {
+            updateData.availableSeats = effectiveTotalSeats - selectedCount;
+          }
+
+          await tx.update(courses).set(updateData).where(eq(courses.id, courseId));
+        });
+      } catch (error) {
+        if (error instanceof CourseCapacityError) {
+          return res.status(400).send(error.message);
+        }
+        throw error;
+      }
+    }
+
+    if (removedCount > 0) res.set("X-Removed-Selections", String(removedCount));
+    res.redirect("/admin/courses");
+  } catch (err) {
+    next(err);
+  }
 });
 
-router.delete("/api/admin/courses/:id", requireAdmin, (req: Request, res: Response) => {
-  const courseId = parseRouteId(req.params.id);
-  if (courseId === null) return res.status(400).send("无效的课程ID");
+router.delete("/api/admin/courses/:id", requireAdmin, async (req: Request, res: Response, next) => {
+  try {
+    const courseId = parseRouteId(req.params.id);
+    if (courseId === null) return res.status(400).send("无效的课程ID");
 
-  const course = db.select().from(courses).where(eq(courses.id, courseId)).get();
-  if (!course) return res.status(404).send("课程不存在");
+    const courseRows = await db.select().from(courses).where(eq(courses.id, courseId));
+    if (courseRows.length === 0) return res.status(404).send("课程不存在");
 
-  db.transaction((tx) => {
-    const accessIds = tx.select({ id: access.id }).from(access).where(eq(access.courseId, courseId)).all();
-    if (accessIds.length > 0) {
-      tx.delete(accessUsers).where(
-        inArray(accessUsers.accessId, accessIds.map(a => a.id))
-      ).run();
-    }
-    tx.delete(access).where(eq(access.courseId, courseId)).run();
-    tx.delete(selections).where(eq(selections.courseId, courseId)).run();
-    tx.delete(courses).where(eq(courses.id, courseId)).run();
-  });
+    await db.transaction(async (tx) => {
+      const accessIds = await tx.select({ id: access.id }).from(access).where(eq(access.courseId, courseId));
+      if (accessIds.length > 0) {
+        await tx.delete(accessUsers).where(
+          inArray(accessUsers.accessId, accessIds.map(a => a.id))
+        );
+      }
+      await tx.delete(access).where(eq(access.courseId, courseId));
+      await tx.delete(selections).where(eq(selections.courseId, courseId));
+      await tx.delete(courses).where(eq(courses.id, courseId));
+    });
 
-  res.status(200).send("OK");
+    res.status(200).send("OK");
+  } catch (err) {
+    next(err);
+  }
 });
 
-router.put("/api/admin/selection-window", requireAdmin, (req: Request, res: Response) => {
-  const startTime = String(req.body.startTime || "");
-  const endTime = String(req.body.endTime || "");
+router.put("/api/admin/selection-window", requireAdmin, async (req: Request, res: Response, next) => {
+  try {
+    const startTime = String(req.body.startTime || "");
+    const endTime = String(req.body.endTime || "");
 
-  if (!startTime || !endTime) {
-    return res.status(400).send("开始时间和截止时间不能为空");
-  }
-  const normalizedStart = normalizeLocalDateTime(startTime);
-  const normalizedEnd = normalizeLocalDateTime(endTime);
-  if (!normalizedStart || !normalizedEnd) {
-    return res.status(400).send("开始时间或截止时间格式不正确");
-  }
-  if (normalizedStart > normalizedEnd) {
-    return res.status(400).send("开始时间不得晚于截止时间");
-  }
-
-  const values = [
-    { key: "start_time", value: normalizedStart },
-    { key: "end_time", value: normalizedEnd },
-  ];
-  db.transaction((tx) => {
-    for (const value of values) {
-      tx.insert(config).values(value)
-        .onConflictDoUpdate({ target: config.key, set: { value: value.value } })
-        .run();
+    if (!startTime || !endTime) {
+      return res.status(400).send("开始时间和截止时间不能为空");
     }
-  });
+    const normalizedStart = normalizeLocalDateTime(startTime);
+    const normalizedEnd = normalizeLocalDateTime(endTime);
+    if (!normalizedStart || !normalizedEnd) {
+      return res.status(400).send("开始时间或截止时间格式不正确");
+    }
+    if (normalizedStart > normalizedEnd) {
+      return res.status(400).send("开始时间不得晚于截止时间");
+    }
 
-  res.redirect("/admin/courses");
+    const values = [
+      { key: "start_time", value: normalizedStart },
+      { key: "end_time", value: normalizedEnd },
+    ];
+    await db.transaction(async (tx) => {
+      for (const value of values) {
+        await tx.insert(config).values(value)
+          .onConflictDoUpdate({ target: config.key, set: { value: value.value } });
+      }
+    });
+
+    res.redirect("/admin/courses");
+  } catch (err) {
+    next(err);
+  }
 });
 
-router.put("/api/admin/config", requireAdmin, (req: Request, res: Response) => {
-  const { key, value } = req.body;
+router.put("/api/admin/config", requireAdmin, async (req: Request, res: Response, next) => {
+  try {
+    const { key, value } = req.body;
 
-  if (!ALLOWED_CONFIG_KEYS.includes(key)) {
-    return res.status(400).send("不可修改的配置项");
+    if (!ALLOWED_CONFIG_KEYS.includes(key)) {
+      return res.status(400).send("不可修改的配置项");
+    }
+
+    if (key === "max_selections" && (!/^\d+$/.test(String(value)) || Number(value) < 1)) {
+      return res.status(400).send("最大选课数必须为正整数");
+    }
+    if (key === "site_title" && !String(value || "").trim()) {
+      return res.status(400).send("显示标题不能为空");
+    }
+    if (key === "student_notice" && String(value || "").length > 2000) {
+      return res.status(400).send("学生通知不能超过2000个字符");
+    }
+
+    let stored = value || "";
+    if (key === "site_title") stored = stored.trim();
+    if (key === "student_notice" || key === "course_instructions") stored = String(stored).trim();
+
+    await db.insert(config).values({ key, value: stored })
+      .onConflictDoUpdate({ target: config.key, set: { value: stored } });
+
+    res.redirect("/admin/courses");
+  } catch (err) {
+    next(err);
   }
-
-  if (key === "max_selections" && (!/^\d+$/.test(String(value)) || Number(value) < 1)) {
-    return res.status(400).send("最大选课数必须为正整数");
-  }
-  if (key === "site_title" && !String(value || "").trim()) {
-    return res.status(400).send("显示标题不能为空");
-  }
-  if (key === "student_notice" && String(value || "").length > 2000) {
-    return res.status(400).send("学生通知不能超过2000个字符");
-  }
-
-  let stored = value || "";
-  if (key === "site_title") stored = stored.trim();
-  if (key === "student_notice" || key === "course_instructions") stored = String(stored).trim();
-
-  db.insert(config).values({ key, value: stored })
-    .onConflictDoUpdate({ target: config.key, set: { value: stored } })
-    .run();
-
-  res.redirect("/admin/courses");
 });
 
 export default router;

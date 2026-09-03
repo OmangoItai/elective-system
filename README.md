@@ -1,6 +1,6 @@
 # 选课系统
 
-一个轻量级的高校选课系统。管理员可配置课程和提前批次开放时间，学生到达开放时间后可抢课。基于事务+行锁防止超卖。
+一个轻量级的高校选课系统。管理员可配置课程和提前批次开放时间，学生到达开放时间后可抢课。基于 PostgreSQL 行锁 + BullMQ 队列防止超卖并支撑高并发。
 
 ## 技术栈
 
@@ -9,19 +9,35 @@
 | 运行时 | Node.js + TypeScript（tsx 直接运行，免编译） |
 | Web 框架 | Express.js 4 |
 | ORM | Drizzle ORM |
-| 数据库 | SQLite（better-sqlite3，WAL 模式） |
+| 数据库 | PostgreSQL |
+| 缓存/队列/Session | Redis |
+| 队列 | BullMQ |
 | 模板引擎 | EJS |
-| Session | express-session + 自定义 SQLite store |
+| Session | express-session + connect-redis |
 | 密码 | bcryptjs |
 | 前端样式 | Tailwind CSS 3 |
 | 前端交互 | HTMX 2.x（CDN） |
 
 ## 快速开始
 
+需要本地运行 PostgreSQL 和 Redis：
+
 ```bash
+# 1. 安装依赖
 npm install
+
+# 2. 配置环境变量
+cp .env.example .env
+# 编辑 .env，设置 DATABASE_URL、REDIS_URL 和 SESSION_SECRET
+
+# 3. 初始化数据库并写入种子数据
 npm run db:init
+
+# 4. 启动 Web 服务
 npm run dev
+
+# 5. 另开一个终端启动选课队列 Worker
+npm run worker
 ```
 
 打开 http://localhost:8080。
@@ -39,17 +55,19 @@ npm run dev
 
 ```
 src/
-├── index.ts                 # 进程入口
+├── index.ts                 # Web 进程入口
 ├── app.ts                   # Express 中间件配置与路由挂载
+├── workers/
+│   └── selection.ts         # BullMQ 选课队列 Worker
 ├── css/
 │   └── input.css            # Tailwind CSS 源文件
 ├── db/
-│   ├── index.ts             # 数据库连接
+│   ├── index.ts             # PostgreSQL 连接池
 │   ├── schema.ts            # Drizzle ORM 表结构定义
-│   ├── migrate.ts           # 运行时兼容迁移
 │   └── seed.ts              # 种子数据
 ├── lib/
-│   └── session-store.ts     # 基于 better-sqlite3 的自定义 Session Store
+│   ├── redis.ts             # Redis 连接
+│   └── queue.ts             # BullMQ 选课队列
 ├── middleware/
 │   └── auth.ts              # requireAuth / requireAdmin 鉴权中间件
 ├── routes/
@@ -75,6 +93,7 @@ src/
     ├── profile.ejs          # 学生个人资料页
     ├── courses.ejs          # 课程列表页
     ├── _course-card.ejs     # 课程卡片组件
+    ├── _course-select-pending.ejs  # 排队中卡片
     ├── selections.ejs       # 我的选课页
     ├── admin-courses.ejs    # 课程管理页
     ├── admin-access.ejs     # 提前批次管理页
@@ -95,7 +114,8 @@ src/
 ### 学生端
 
 - 查看课程列表（仅显示当前年级允许的课程）及管理员维护的课程说明，显示剩余名额和精确到秒的开放/截止倒计时
-- 到达开放时间后点击抢课（HTMX 局部更新）；已选课程数达到最大报课数后，浏览器会禁用其余抢课按钮
+- 到达开放时间后点击抢课（HTMX 局部更新）。请求进入 BullMQ 队列异步处理，前端显示"排队中"并轮询结果
+- 已选课程数达到最大报课数后，浏览器会禁用其余抢课按钮
 - 查看已选课程，支持退课
 - 首次登录缺少手机号时必须先补全资料；可修改手机号、班级、年级和密码
 
@@ -129,29 +149,51 @@ src/
 
 ## 抢课并发策略
 
-- SQLite WAL 模式：读不阻塞写
-- better-sqlite3 单连接，写操作天然串行
-- 抢课走事务，检查并扣名额在同一事务内完成
+- 抢课请求先经过轻量校验；课程已满的直接返回，其余进入 BullMQ 队列
+- Worker 使用 PostgreSQL `SELECT ... FOR UPDATE` 行锁扣减名额并插入选课记录
+- 多个 Worker 进程可并行处理不同课程的选课；同一课程的选课请求在行锁上串行
 - `selections` 表 `UNIQUE(user_id, course_id)` 防止重复选课
+- 业务错误（已满、已选过、时间未到等）通过 `UnrecoverableError` 标记，BullMQ 不会重试
 
 ## 可用脚本
 
 ```bash
 npm run dev              # 开发模式（CSS watch + tsx watch 热重载）
-npm start                # 生产模式（先编译 CSS 再启动）
+npm start                # 生产模式（先编译 CSS 再启动 Web）
+npm run worker           # 启动选课队列 Worker
 npm run build:css        # 编译 Tailwind CSS
 npm run db:push          # 推送 Drizzle schema 到数据库
 npm run db:seed          # 写入种子数据
 npm run db:init          # db:push + db:seed
 npm run typecheck        # TypeScript 类型检查
-npm test                 # 年级 / 中国时间 / 选课窗口 / 迁移测试
+npm test                 # 运行测试（需要本地 PostgreSQL + Redis）
 ```
 
 ## 部署
 
+### Docker Compose（推荐）
+
+```bash
+cp .env.example .env
+# 编辑 .env，设置 SESSION_SECRET
+docker compose up -d
+```
+
+Compose 会启动 `postgres`、`redis`、`app`（Web 服务）和 `worker`（选课队列 Worker）四个服务。Worker 可以水平扩展：
+
+```bash
+docker compose up -d --scale worker=4
+```
+
+### 手动部署
+
 ```bash
 npm run db:init
-NODE_ENV=production SESSION_SECRET="请替换为足够长的随机值" npm start
+NODE_ENV=production \
+  DATABASE_URL=postgres://... \
+  REDIS_URL=redis://... \
+  SESSION_SECRET="请替换为足够长的随机值" \
+  npm start
 ```
 
 端口 8080，前面套 Nginx/Caddy 反代 + SSL。生产模式必须提供 `SESSION_SECRET`，且浏览器只会通过 HTTPS 发送 Session Cookie。

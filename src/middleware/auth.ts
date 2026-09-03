@@ -8,17 +8,21 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
-export function requireAdmin(req: Request, res: Response, next: NextFunction) {
-  if (!req.session.userId) return res.redirect("/login");
+export async function requireAdmin(req: Request, res: Response, next: NextFunction) {
+  try {
+    if (!req.session.userId) return res.redirect("/login");
 
-  const user = db.select({ isAdmin: users.isAdmin })
-    .from(users)
-    .where(eq(users.id, req.session.userId))
-    .get();
+    const userRows = await db.select({ isAdmin: users.isAdmin })
+      .from(users)
+      .where(eq(users.id, req.session.userId));
+    const user = userRows[0];
 
-  if (!user || !user.isAdmin) {
-    req.session.isAdmin = 0;
-    return res.redirect("/login");
+    if (!user || !user.isAdmin) {
+      req.session.isAdmin = 0;
+      return res.redirect("/login");
+    }
+    next();
+  } catch (err) {
+    next(err);
   }
-  next();
 }
