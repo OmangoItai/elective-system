@@ -1,0 +1,38 @@
+# Load-test scaling override:
+# - Build app/worker from the slimmer load-test Dockerfile that uses a cached base image.
+# - Add an nginx reverse proxy that load-balances across app replicas.
+# Usage:
+#   docker compose -f compose.yaml -f compose.load-test.yaml up -d --scale app=4 --scale worker=4
+services:
+  app:
+    build:
+      dockerfile: Dockerfile.load-test
+    environment:
+      DATABASE_POOL_SIZE: 50
+  worker:
+    build:
+      dockerfile: Dockerfile.load-test
+    environment:
+      DATABASE_POOL_SIZE: 50
+  postgres:
+    ports:
+      - "5432:5432"
+    command:
+      - postgres
+      - -c
+      - max_connections=500
+      - -c
+      - shared_buffers=256MB
+  redis:
+    ports:
+      - "6379:6379"
+  nginx:
+    image: nginx:alpine
+    container_name: elective-nginx
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    volumes:
+      - ./scripts/load-test/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - app

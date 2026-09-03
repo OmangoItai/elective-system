@@ -3,7 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express, { type NextFunction, type Request, type Response } from "express";
 import session from "express-session";
-import { RedisStore } from "connect-redis";
+import RedisStore from "connect-redis";
 import { eq } from "drizzle-orm";
 import { db } from "./db/index";
 import { redis } from "./lib/redis";
@@ -50,16 +50,29 @@ export function createApp() {
   app.set("views", path.join(currentDirectory, "views"));
   app.use(csrfMiddleware);
 
+  const configCache = new Map<string, { value: string; expiresAt: number }>();
+  async function getConfig(key: string): Promise<string | undefined> {
+    const cached = configCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
+    const rows = await db.select({ value: config.value }).from(config).where(eq(config.key, key));
+    const value = rows[0]?.value;
+    if (value !== undefined) {
+      configCache.set(key, { value, expiresAt: Date.now() + 5000 });
+    }
+    return value;
+  }
+
   app.use(async (req, res, next) => {
     try {
       res.locals.currentPath = req.path;
-      res.locals.user = req.session.userId
-        ? (await db.select().from(users).where(eq(users.id, req.session.userId)))[0] || null
-        : null;
-      const siteTitle = await db.select({ value: config.value }).from(config).where(eq(config.key, "site_title"));
-      res.locals.siteTitle = siteTitle[0]?.value || "选课系统";
-      const studentNoticeRow = await db.select({ value: config.value }).from(config).where(eq(config.key, "student_notice"));
-      const studentNotice = studentNoticeRow[0]?.value.trim() || "";
+      let user = req.session.user;
+      if (user === undefined && req.session.userId) {
+        user = (await db.select().from(users).where(eq(users.id, req.session.userId)))[0] || null;
+        req.session.user = user;
+      }
+      res.locals.user = user || null;
+      res.locals.siteTitle = (await getConfig("site_title")) || "选课系统";
+      const studentNotice = ((await getConfig("student_notice")) || "").trim();
       res.locals.studentNoticeSegments = res.locals.user && !res.locals.user.isAdmin && res.locals.user.phone && studentNotice
         ? linkifyStudentNotice(studentNotice)
         : [];

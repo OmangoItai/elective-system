@@ -30,10 +30,7 @@ services:
   app:
     build: .
     image: elective-system:latest
-    container_name: elective-system
     restart: unless-stopped
-    ports:
-      - "8080:8080"
     environment:
       NODE_ENV: production
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/elective
@@ -49,7 +46,6 @@ services:
   worker:
     build: .
     image: elective-system:latest
-    container_name: elective-worker
     restart: unless-stopped
     environment:
       NODE_ENV: production

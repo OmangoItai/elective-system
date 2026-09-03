@@ -1,0 +1,27 @@
+# Load-test variant: uses the locally cached node:24-bookworm-slim image so we
+# don't have to wait for the multi-hundred-megabyte node:22-bookworm download.
+# The application code is identical; only the base image differs.
+FROM node:24-bookworm-slim AS build
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci
+
+COPY . .
+RUN npm run typecheck && npm run build:css
+
+FROM node:24-bookworm-slim AS runtime
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+
+COPY --from=build /app/src ./src
+COPY --from=build /app/drizzle ./drizzle
+COPY --from=build /app/public ./public
+
+EXPOSE 8080
+
+CMD ["./node_modules/.bin/tsx", "src/index.ts"]

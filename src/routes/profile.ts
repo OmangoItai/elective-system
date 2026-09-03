@@ -71,6 +71,7 @@ router.post("/api/profile", requireAuth, async (req: Request, res: Response, nex
       await removeUserIneligibleSelections(tx, user.id, profile.value.grade);
     });
 
+    delete req.session.user;
     res.redirect("/courses");
   } catch (err) {
     next(err);

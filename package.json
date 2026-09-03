@@ -12,15 +12,14 @@
     "db:migrate": "tsx src/db/migrate-cli.ts",
     "db:push": "drizzle-kit push",
     "db:seed": "tsx src/db/seed.ts",
-    "db:init": "npm run db:migrate && npm run db:push && npm run db:seed",
+    "db:init": "npm run db:migrate && npm run db:seed",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts"
   },
   "dependencies": {
     "bcryptjs": "^2.4",
-    "better-sqlite3": "^11.7",
     "bullmq": "^6.3.4",
-    "connect-redis": "^10.0.0",
+    "connect-redis": "^7.1.1",
     "drizzle-orm": "^0.45.2",
     "ejs": "^3.1",
     "express": "^4.21",
@@ -31,7 +30,6 @@
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4",
-    "@types/better-sqlite3": "^7.6",
     "@types/ejs": "^3.1",
     "@types/express": "^5.0",
     "@types/express-session": "^1.18",

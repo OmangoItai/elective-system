@@ -4,7 +4,10 @@ import * as schema from "./schema";
 
 const connectionString = process.env.DATABASE_URL || "postgres://postgres:postgres@localhost:5432/elective";
 
-export const pool = new Pool({ connectionString });
+export const pool = new Pool({
+  connectionString,
+  max: Number(process.env.DATABASE_POOL_SIZE || 10),
+});
 export const db = drizzle(pool, { schema });
 
 export async function closeDb(): Promise<void> {

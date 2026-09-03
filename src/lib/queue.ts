@@ -1,5 +1,5 @@
 import { Queue } from "bullmq";
-import { redis, redisUrl } from "./redis";
+import { queueRedis, redisUrl } from "./redis";
 
 export interface SelectionJobData {
   userId: number;
@@ -8,7 +8,7 @@ export interface SelectionJobData {
 }
 
 export const selectionQueue = new Queue<SelectionJobData>("selection", {
-  connection: { url: redisUrl },
+  connection: queueRedis,
 });
 
 export async function addSelectionJob(data: SelectionJobData) {
@@ -22,5 +22,5 @@ export async function getJob(jobId: string) {
 
 export async function closeQueue() {
   await selectionQueue.close();
-  await redis.quit();
+  await queueRedis.quit();
 }

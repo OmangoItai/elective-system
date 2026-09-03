@@ -1,0 +1,11 @@
+# Default override: expose app, PostgreSQL and Redis to the host for local development.
+services:
+  app:
+    ports:
+      - "8080:8080"
+  postgres:
+    ports:
+      - "5432:5432"
+  redis:
+    ports:
+      - "6379:6379"
