@@ -3,6 +3,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import * as schema from "./schema";
 import { users, courses, access, accessUsers, config } from "./schema";
+import { createCourseSeats } from "../services/seats";
 
 export async function seed(d: ReturnType<typeof drizzle>) {
   const existingUser = await d.select({ id: users.id }).from(users).limit(1);
@@ -26,7 +27,7 @@ export async function seed(d: ReturnType<typeof drizzle>) {
     { username: "student", nickname: "示例学生", password: studentHash, isAdmin: 0, grade: 2024 },
   ]);
 
-  await d.insert(courses).values([
+  const insertedCourses = await d.insert(courses).values([
     {
       name: "Python入门",
       teacher: "张老师",
@@ -49,7 +50,11 @@ export async function seed(d: ReturnType<typeof drizzle>) {
       openTime: "2026-08-30T00:00:00",
       allowedGrades: "2025,2026",
     },
-  ]);
+  ]).returning({ id: courses.id, totalSeats: courses.totalSeats });
+
+  for (const c of insertedCourses) {
+    await createCourseSeats(d, c.id, c.totalSeats);
+  }
 
   await d.insert(access).values({
     courseId: 1,

@@ -15,6 +15,7 @@ import { parseRouteId } from "../utils/parse-id";
 import { parseAllowedGrades, serializeAllowedGrades } from "../utils/grade";
 import { readEndTime, readStartTime } from "../utils/app-config";
 import { removeIneligibleSelections } from "../services/course-grade";
+import { createCourseSeats, adjustCourseSeats, syncCourseAvailableSeats } from "../services/seats";
 
 const router = Router();
 
@@ -97,7 +98,7 @@ router.post("/api/admin/courses", requireAdmin, async (req: Request, res: Respon
       return res.status(400).send(errors.join("；"));
     }
 
-    await db.insert(courses).values({
+    const [newCourse] = await db.insert(courses).values({
       name: name.trim(),
       teacher: teacher.trim(),
       description: description || null,
@@ -107,7 +108,9 @@ router.post("/api/admin/courses", requireAdmin, async (req: Request, res: Respon
       availableSeats: totalSeats,
       openTime: normalizeStartOfDay(openTime) || nowLocal(),
       allowedGrades,
-    });
+    }).returning({ id: courses.id });
+
+    await createCourseSeats(db, newCourse.id, totalSeats);
 
     res.redirect("/admin/courses");
   } catch (err) {
@@ -186,6 +189,11 @@ router.put("/api/admin/courses/:id", requireAdmin, async (req: Request, res: Res
           }
 
           await tx.update(courses).set(updateData).where(eq(courses.id, courseId));
+
+          if (parsedTotalSeats !== undefined || shouldResetSeats) {
+            await adjustCourseSeats(tx, courseId, effectiveTotalSeats);
+            await syncCourseAvailableSeats(tx, courseId);
+          }
         });
       } catch (error) {
         if (error instanceof CourseCapacityError) {

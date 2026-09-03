@@ -1,5 +1,5 @@
 import { Worker, UnrecoverableError } from "bullmq";
-import { eq, and, count } from "drizzle-orm";
+import { eq, and, count, sql } from "drizzle-orm";
 import { db } from "../db/index";
 import { courses, selections } from "../db/schema";
 import { readMaxSelections, readOpenTimeForUser } from "../services/selection-policy";
@@ -7,6 +7,7 @@ import { readStartTime, readEndTime } from "../utils/app-config";
 import { effectiveOpenTime } from "../utils/course-state";
 import { asEndInstant } from "../utils/time";
 import { redisUrl } from "../lib/redis";
+import { claimCourseSeat } from "../services/seats";
 import type { SelectionJobData } from "../lib/queue";
 
 const concurrency = 4;
@@ -17,16 +18,6 @@ export const selectionWorker = new Worker<SelectionJobData>(
     const { userId, courseId, now } = job.data;
 
     await db.transaction(async (tx) => {
-      const [course] = await tx
-        .select()
-        .from(courses)
-        .where(eq(courses.id, courseId))
-        .for("update");
-
-      if (!course) {
-        throw new UnrecoverableError("课程不存在");
-      }
-
       const currentCount = await tx
         .select({ count: count() })
         .from(selections)
@@ -47,9 +38,6 @@ export const selectionWorker = new Worker<SelectionJobData>(
       if (now >= asEndInstant(endTime)) {
         throw new UnrecoverableError("选课已截止");
       }
-      if (course.availableSeats <= 0) {
-        throw new UnrecoverableError("没有剩余名额");
-      }
 
       const existing = await tx
         .select()
@@ -59,12 +47,16 @@ export const selectionWorker = new Worker<SelectionJobData>(
         throw new UnrecoverableError("已选过该课程");
       }
 
-      await tx
-        .update(courses)
-        .set({ availableSeats: course.availableSeats - 1 })
-        .where(eq(courses.id, courseId));
+      const claimed = await claimCourseSeat(tx, courseId, userId, now);
+      if (!claimed) {
+        throw new UnrecoverableError("没有剩余名额");
+      }
 
       await tx.insert(selections).values({ userId, courseId, createdAt: now });
+      await tx
+        .update(courses)
+        .set({ availableSeats: sql`${courses.availableSeats} - 1` })
+        .where(eq(courses.id, courseId));
     });
   },
   {
