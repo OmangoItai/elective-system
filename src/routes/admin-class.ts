@@ -8,6 +8,7 @@ import { parseRouteId } from "../utils/parse-id";
 import { formatAllowedGrades } from "../utils/grade";
 import { isGradeAllowed } from "../utils/grade";
 import { readMaxSelections } from "../services/selection-policy";
+import { resetCourseSeats } from "../services/seats";
 
 const router = Router();
 
@@ -127,6 +128,8 @@ router.put(
               validIds.map((userId) => ({ userId, courseId, createdAt: now }))
             );
         }
+
+        await resetCourseSeats(tx, courseId, course.totalSeats, validIds);
 
         await tx.update(courses)
           .set({ availableSeats: course.totalSeats - validIds.length })

@@ -90,6 +90,12 @@ async function setup() {
       [COURSE_SEATS, openTime]
     );
 
+    await pool.query(`DELETE FROM course_seats WHERE course_id = 1`);
+    await pool.query(
+      `INSERT INTO course_seats (course_id) SELECT 1 FROM generate_series(1, $1)`,
+      [COURSE_SEATS]
+    );
+
     await pool.query(
       `INSERT INTO config (key, value) VALUES ('start_time', $1), ('end_time', $2), ('max_selections', '1')
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
@@ -113,6 +119,15 @@ async function setup() {
           userId,
           isAdmin: false,
           csrfToken: csrf,
+          user: {
+            id: userId,
+            username: `loadtest${userId}`,
+            nickname: `学生${userId}`,
+            isAdmin: false,
+            grade: 2024,
+            className: `班级${(userId % 10) + 1}`,
+            phone: `1380000${String(userId).padStart(5, '0')}`,
+          },
           cookie: {
             originalMaxAge: 7 * 24 * 60 * 60 * 1000,
             expires,

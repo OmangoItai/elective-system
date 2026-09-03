@@ -1,9 +1,11 @@
-import { eq, inArray } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import { courses, selections, users } from "../db/schema";
 import { isGradeAllowed, studentGrade } from "../utils/grade";
+import { releaseCourseSeat } from "./seats";
 
 interface SelectionWithGrade {
   selectionId: number;
+  userId: number;
   grade: number | null;
 }
 
@@ -19,17 +21,24 @@ export async function removeIneligibleSelections(
   allowedGrades: string | null,
 ): Promise<{ removedCount: number; selectedCount: number }> {
   const selected = await client
-    .select({ selectionId: selections.id, grade: users.grade })
+    .select({ selectionId: selections.id, userId: selections.userId, grade: users.grade })
     .from(selections)
     .innerJoin(users, eq(selections.userId, users.id))
     .where(eq(selections.courseId, courseId)) as SelectionWithGrade[];
 
-  const removedIds = selected
-    .filter(({ grade }) => !isGradeAllowed(studentGrade(grade), allowedGrades))
-    .map(({ selectionId }) => selectionId);
+  const removed = selected
+    .filter(({ grade }) => !isGradeAllowed(studentGrade(grade), allowedGrades));
+  const removedIds = removed.map(({ selectionId }) => selectionId);
 
   if (removedIds.length > 0) {
     await client.delete(selections).where(inArray(selections.id, removedIds));
+    for (const { userId } of removed) {
+      await releaseCourseSeat(client, courseId, userId);
+    }
+    await client
+      .update(courses)
+      .set({ availableSeats: sql`${courses.availableSeats} + ${removedIds.length}` })
+      .where(eq(courses.id, courseId));
   }
 
   return {
@@ -54,16 +63,16 @@ export async function removeUserIneligibleSelections(
 
   await client.delete(selections).where(inArray(selections.id, removed.map((item) => item.selectionId)));
 
-  for (const courseId of new Set(removed.map((item) => item.courseId))) {
-    const courseRows = await client.select().from(courses).where(eq(courses.id, courseId));
-    const course = courseRows[0];
-    if (!course) continue;
-    const selectedRows = await client
-      .select({ id: selections.id })
-      .from(selections)
-      .where(eq(selections.courseId, courseId));
-    await client.update(courses)
-      .set({ availableSeats: course.totalSeats - selectedRows.length })
+  const removedByCourse = new Map<number, number>();
+  for (const { courseId } of removed) {
+    removedByCourse.set(courseId, (removedByCourse.get(courseId) || 0) + 1);
+  }
+
+  for (const [courseId, count] of removedByCourse) {
+    await releaseCourseSeat(client, courseId, userId);
+    await client
+      .update(courses)
+      .set({ availableSeats: sql`${courses.availableSeats} + ${count}` })
       .where(eq(courses.id, courseId));
   }
 

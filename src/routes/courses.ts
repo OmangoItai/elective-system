@@ -1,7 +1,7 @@
 import { Router, Request, Response } from "express";
-import { eq, and, count } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 import { db } from "../db/index";
-import { courses, selections, users } from "../db/schema";
+import { courses, selections } from "../db/schema";
 import { requireAuth } from "../middleware/auth";
 import { asEndInstant, nowLocal } from "../utils/time";
 import { parseRouteId } from "../utils/parse-id";
@@ -9,6 +9,7 @@ import { isGradeAllowed, studentGrade } from "../utils/grade";
 import { effectiveOpenTime, resolveCourseState } from "../utils/course-state";
 import { readConfig, readEndTime, readStartTime } from "../utils/app-config";
 import { readMaxSelections, readOpenTimeForUser } from "../services/selection-policy";
+import { releaseCourseSeat } from "../services/seats";
 import { addSelectionJob, getJob } from "../lib/queue";
 
 const router = Router();
@@ -17,10 +18,10 @@ router.get("/courses", requireAuth, async (req: Request, res: Response, next) =>
   try {
     if (req.session.isAdmin) return res.redirect("/admin/courses");
 
-    const userId = req.session.userId!;
+    const user = res.locals.user;
+    if (!user) return res.redirect("/login");
     const now = nowLocal();
-    const userRows = await db.select().from(users).where(eq(users.id, userId));
-    const grade = studentGrade(userRows[0]?.grade);
+    const grade = studentGrade(user.grade);
     const startTime = await readStartTime(db);
     const endTime = await readEndTime(db);
     const maxSelections = await readMaxSelections(db);
@@ -31,13 +32,13 @@ router.get("/courses", requireAuth, async (req: Request, res: Response, next) =>
     const selectedRows = await db
       .select({ courseId: selections.courseId })
       .from(selections)
-      .where(eq(selections.userId, userId));
+      .where(eq(selections.userId, user.id));
     const selectedIds = new Set(selectedRows.map((r) => r.courseId));
 
     const courseList = [];
     for (const c of allCourses) {
       if (!isGradeAllowed(grade, c.allowedGrades)) continue;
-      const courseOpen = await readOpenTimeForUser(db, userId, c.id);
+      const courseOpen = await readOpenTimeForUser(db, user.id, c.id);
       const opentime = effectiveOpenTime(courseOpen, startTime);
       const isSelected = selectedIds.has(c.id);
       const state = resolveCourseState({
@@ -65,48 +66,45 @@ router.post("/api/courses/:id/select", requireAuth, async (req: Request, res: Re
   try {
     if (req.session.isAdmin) return res.status(403).send("管理员不能选课");
 
-    const userId = req.session.userId!;
+    const user = res.locals.user;
+    if (!user) return res.status(403).send("请先登录");
+
     const courseId = parseRouteId(req.params.id);
     if (courseId === null) return res.status(400).send("无效的课程ID");
     const now = nowLocal();
 
-    const courseRows = await db.select().from(courses).where(eq(courses.id, courseId));
+    const courseRows = await db
+      .select({
+        id: courses.id,
+        name: courses.name,
+        teacher: courses.teacher,
+        courseTime: courses.courseTime,
+        location: courses.location,
+        openTime: courses.openTime,
+        allowedGrades: courses.allowedGrades,
+        availableSeats: courses.availableSeats,
+      })
+      .from(courses)
+      .where(eq(courses.id, courseId));
     if (courseRows.length === 0) {
       return res.status(400).send("课程不存在");
     }
     const course = courseRows[0];
 
-    const userRows = await db.select().from(users).where(eq(users.id, userId));
-    const grade = studentGrade(userRows[0]?.grade);
+    const grade = studentGrade(user.grade);
     if (!isGradeAllowed(grade, course.allowedGrades)) {
       return res.status(400).send("当前年级不可选择该课程");
     }
 
-    const opentime = await readOpenTimeForUser(db, userId, courseId);
     const startTime = await readStartTime(db);
     const endTime = await readEndTime(db);
-    const effectiveOpen = effectiveOpenTime(opentime, startTime);
+    const effectiveOpen = effectiveOpenTime(course.openTime, startTime);
 
     if (now < effectiveOpen) return res.status(400).send("尚未到开放时间");
     if (now >= asEndInstant(endTime)) return res.status(400).send("选课已截止");
     if (course.availableSeats <= 0) return res.status(400).send("没有剩余名额");
 
-    const existing = await db
-      .select()
-      .from(selections)
-      .where(and(eq(selections.userId, userId), eq(selections.courseId, courseId)));
-    if (existing.length > 0) return res.status(400).send("已选过该课程");
-
-    const currentCount = await db
-      .select({ count: count() })
-      .from(selections)
-      .where(eq(selections.userId, userId));
-    const maxSelections = await readMaxSelections(db);
-    if (currentCount[0].count >= maxSelections) {
-      return res.status(400).send(`最多只能选 ${maxSelections} 门课`);
-    }
-
-    const jobId = await addSelectionJob({ userId, courseId, now });
+    const jobId = await addSelectionJob({ userId: user.id, courseId, now });
     res.render("_course-select-pending", { c: course, jobId: String(jobId), layout: false });
   } catch (e: any) {
     const msg = e.message || "";
@@ -197,12 +195,10 @@ router.post("/api/courses/:id/drop", requireAuth, async (req: Request, res: Resp
       if (sel.length === 0) throw new Error("未选过该课程");
 
       await tx.delete(selections).where(eq(selections.id, sel[0].id));
-
-      const courseRows = await tx.select().from(courses).where(eq(courses.id, courseId));
-      const course = courseRows[0]!;
+      await releaseCourseSeat(tx, courseId, userId);
       await tx
         .update(courses)
-        .set({ availableSeats: course.availableSeats + 1 })
+        .set({ availableSeats: sql`${courses.availableSeats} + 1` })
         .where(eq(courses.id, courseId));
     });
 

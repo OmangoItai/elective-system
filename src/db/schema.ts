@@ -24,6 +24,15 @@ export const courses = pgTable("courses", {
   allowedGrades: text("allowed_grades"),
 });
 
+export const courseSeats = pgTable("course_seats", {
+  id: serial("id").primaryKey(),
+  courseId: integer("course_id").notNull().references(() => courses.id, { onDelete: "cascade" }),
+  userId: integer("user_id").references(() => users.id, { onDelete: "set null" }),
+  createdAt: text("created_at"),
+}, (table) => ({
+  uniqUserPerCourse: unique().on(table.courseId, table.userId),
+}));
+
 export const access = pgTable("access", {
   id: serial("id").primaryKey(),
   courseId: integer("course_id").notNull().references(() => courses.id),
