@@ -1,36 +1,32 @@
 import bcryptjs from "bcryptjs";
-import Database from "better-sqlite3";
-import { mkdirSync } from "node:fs";
-import { drizzle } from "drizzle-orm/better-sqlite3";
-import { sql } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/node-postgres";
+import { Pool } from "pg";
 import * as schema from "./schema";
 import { users, courses, access, accessUsers, config } from "./schema";
-import { migrate } from "./migrate";
 
-export function seed(d: ReturnType<typeof drizzle>) {
-  const existingUser = d.select({ id: users.id }).from(users).limit(1).get();
-  if (existingUser) {
+export async function seed(d: ReturnType<typeof drizzle>) {
+  const existingUser = await d.select({ id: users.id }).from(users).limit(1);
+  if (existingUser.length > 0) {
     console.log("Seed skipped: existing data preserved");
     return;
   }
 
-  d.delete(accessUsers).run();
-  d.delete(access).run();
-  d.delete(schema.selections).run();
-  d.delete(courses).run();
-  d.delete(users).run();
-  d.delete(config).run();
-  d.run(sql.raw("DELETE FROM sqlite_sequence"));
+  await d.delete(accessUsers);
+  await d.delete(access);
+  await d.delete(schema.selections);
+  await d.delete(courses);
+  await d.delete(users);
+  await d.delete(config);
 
   const adminHash = bcryptjs.hashSync("123", 10);
   const studentHash = bcryptjs.hashSync("123", 10);
 
-  d.insert(users).values([
+  await d.insert(users).values([
     { username: "admin", nickname: "管理员", password: adminHash, isAdmin: 1 },
     { username: "student", nickname: "示例学生", password: studentHash, isAdmin: 0, grade: 2024 },
-  ]).run();
+  ]);
 
-  d.insert(courses).values([
+  await d.insert(courses).values([
     {
       name: "Python入门",
       teacher: "张老师",
@@ -53,31 +49,41 @@ export function seed(d: ReturnType<typeof drizzle>) {
       openTime: "2026-08-30T00:00:00",
       allowedGrades: "2025,2026",
     },
-  ]).run();
+  ]);
 
-  d.insert(access).values({
+  await d.insert(access).values({
     courseId: 1,
     openTime: "2026-08-09T00:00:00",
-  }).run();
+  });
 
-  d.insert(accessUsers).values([
+  await d.insert(accessUsers).values([
     { accessId: 1, userId: 2 },
-  ]).run();
+  ]);
 
-  d.insert(config).values([
+  await d.insert(config).values([
     { key: "end_time", value: "2026-09-30T23:59:59" },
     { key: "start_time", value: "2026-09-05T00:00:00" },
     { key: "site_title", value: "选课系统" },
     { key: "max_selections", value: "1" },
-  ]).run();
+  ]);
 
   console.log("Seed done");
 }
 
-mkdirSync("data", { recursive: true });
-const sqlite = new Database("data/db.sqlite");
-sqlite.pragma("journal_mode = WAL");
-migrate(sqlite);
-const d = drizzle(sqlite, { schema });
-seed(d);
-sqlite.close();
+async function main() {
+  const connectionString = process.env.DATABASE_URL || "postgres://postgres:postgres@localhost:5432/elective";
+  const pool = new Pool({ connectionString });
+  const d = drizzle(pool, { schema });
+  try {
+    await seed(d);
+  } finally {
+    await pool.end();
+  }
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}

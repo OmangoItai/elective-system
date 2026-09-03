@@ -1,13 +1,13 @@
 import crypto from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import Database from "better-sqlite3";
 import express, { type NextFunction, type Request, type Response } from "express";
 import session from "express-session";
+import { RedisStore } from "connect-redis";
 import { eq } from "drizzle-orm";
 import { db } from "./db/index";
+import { redis } from "./lib/redis";
 import { config, users } from "./db/schema";
-import { BetterSqlite3Store } from "./lib/session-store";
 import adminAccessRouter from "./routes/admin-access";
 import adminClassRouter from "./routes/admin-class";
 import adminCoursesRouter from "./routes/admin-courses";
@@ -32,11 +32,8 @@ export function createApp() {
     throw new Error("SESSION_SECRET is required in production");
   }
 
-  const sessionDb = new Database("data/sessions.db");
-  sessionDb.pragma("journal_mode = WAL");
-  app.locals.sessionDb = sessionDb;
   app.use(session({
-    store: new BetterSqlite3Store({ db: sessionDb }),
+    store: new RedisStore({ client: redis }),
     secret: process.env.SESSION_SECRET || "elective-system-secret-change-in-production",
     resave: false,
     saveUninitialized: false,
@@ -53,18 +50,23 @@ export function createApp() {
   app.set("views", path.join(currentDirectory, "views"));
   app.use(csrfMiddleware);
 
-  app.use((req, res, next) => {
-    res.locals.currentPath = req.path;
-    res.locals.user = req.session.userId
-      ? db.select().from(users).where(eq(users.id, req.session.userId)).get() || null
-      : null;
-    const siteTitle = db.select({ value: config.value }).from(config).where(eq(config.key, "site_title")).get();
-    res.locals.siteTitle = siteTitle?.value || "选课系统";
-    const studentNotice = db.select({ value: config.value }).from(config).where(eq(config.key, "student_notice")).get()?.value.trim() || "";
-    res.locals.studentNoticeSegments = res.locals.user && !res.locals.user.isAdmin && res.locals.user.phone && studentNotice
-      ? linkifyStudentNotice(studentNotice)
-      : [];
-    next();
+  app.use(async (req, res, next) => {
+    try {
+      res.locals.currentPath = req.path;
+      res.locals.user = req.session.userId
+        ? (await db.select().from(users).where(eq(users.id, req.session.userId)))[0] || null
+        : null;
+      const siteTitle = await db.select({ value: config.value }).from(config).where(eq(config.key, "site_title"));
+      res.locals.siteTitle = siteTitle[0]?.value || "选课系统";
+      const studentNoticeRow = await db.select({ value: config.value }).from(config).where(eq(config.key, "student_notice"));
+      const studentNotice = studentNoticeRow[0]?.value.trim() || "";
+      res.locals.studentNoticeSegments = res.locals.user && !res.locals.user.isAdmin && res.locals.user.phone && studentNotice
+        ? linkifyStudentNotice(studentNotice)
+        : [];
+      next();
+    } catch (err) {
+      next(err);
+    }
   });
 
   app.use((req, res, next) => {

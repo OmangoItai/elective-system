@@ -1,37 +1,55 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { execSync } from "node:child_process";
 import type { Server } from "node:http";
 import bcryptjs from "bcryptjs";
-import Database from "better-sqlite3";
+import { Pool } from "pg";
+import Redis from "ioredis";
+import { drizzle } from "drizzle-orm/node-postgres";
+import { eq } from "drizzle-orm";
+import * as schema from "../src/db/schema";
+import { seed } from "../src/db/seed";
+import { closeQueue } from "../src/lib/queue";
+import { selectionWorker } from "../src/workers/selection";
 
 const originalDirectory = process.cwd();
-const fixtureDirectory = mkdtempSync(join(tmpdir(), "elective-routes-"));
+const databaseUrl = process.env.DATABASE_URL || "postgres://postgres:postgres@localhost:5432/elective_test";
+const redisUrl = process.env.REDIS_URL || "redis://localhost:6379/1";
+
 let baseUrl = "";
 let server: Server | undefined;
-let sessionDb: Database.Database | undefined;
-let rawDb: Database.Database | undefined;
+let pool: Pool | undefined;
+let rawDb: ReturnType<typeof drizzle> | undefined;
+let redis: Redis | undefined;
 
 before(async () => {
-  process.chdir(fixtureDirectory);
-  mkdirSync("data");
-  createSchema();
+  process.env.DATABASE_URL = databaseUrl;
+  process.env.REDIS_URL = redisUrl;
 
-  const [{ createApp }, database] = await Promise.all([
+  pool = new Pool({ connectionString: databaseUrl });
+  rawDb = drizzle(pool, { schema });
+
+  // Recreate schema
+  await pool.query("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;");
+  execSync("npx drizzle-kit push", {
+    env: { ...process.env, DATABASE_URL: databaseUrl },
+    stdio: "ignore",
+  });
+
+  redis = new Redis(redisUrl);
+  await redis.flushdb();
+
+  await seed(rawDb);
+
+  const [{ createApp }] = await Promise.all([
     import("../src/app"),
-    import("../src/db/index"),
   ]);
-  rawDb = database.rawDb;
-  seedFixture(rawDb);
 
   const app = createApp();
-  sessionDb = app.locals.sessionDb;
   await new Promise<void>((resolve) => {
     server = app.listen(0, "127.0.0.1", resolve);
   });
-  const address = server.address();
+  const address = server!.address();
   assert.ok(address && typeof address === "object");
   baseUrl = `http://127.0.0.1:${address.port}`;
 });
@@ -42,10 +60,11 @@ after(async () => {
       server!.close((error) => error ? reject(error) : resolve());
     });
   }
-  sessionDb?.close();
-  rawDb?.close();
+  await selectionWorker.close();
+  await closeQueue();
+  await redis?.quit();
+  await pool?.end();
   process.chdir(originalDirectory);
-  rmSync(fixtureDirectory, { recursive: true, force: true });
 });
 
 describe("grade and selection routes", () => {
@@ -71,6 +90,9 @@ describe("grade and selection routes", () => {
   });
 
   it("rejects an administrator assigning an ineligible student", async () => {
+    await rawDb!.insert(schema.selections).values({ userId: 2, courseId: 1, createdAt: "2026-08-27T00:00:00" });
+    await rawDb!.update(schema.courses).set({ availableSeats: 9 }).where(eq(schema.courses.id, 1));
+
     const admin = await login("admin", "123");
     const response = await fetch(`${baseUrl}/api/admin/class/courses/2/students`, {
       method: "PUT",
@@ -83,7 +105,8 @@ describe("grade and selection routes", () => {
 
     assert.equal(response.status, 400);
     assert.match(await response.text(), /不允许年级/);
-    assert.equal(rawDb!.prepare("SELECT count(*) FROM selections WHERE user_id = 2 AND course_id = 2").pluck().get(), 0);
+    const countResult = await pool!.query("SELECT count(*) FROM selections WHERE user_id = 2 AND course_id = 2");
+    assert.equal(Number(countResult.rows[0].count), 0);
   });
 
   it("renders second-precision selection window inputs without a minimum date", async () => {
@@ -122,8 +145,10 @@ describe("grade and selection routes", () => {
     });
 
     assert.equal(response.status, 302);
-    assert.equal(rawDb!.prepare("SELECT value FROM config WHERE key = 'start_time'").pluck().get(), "2026-08-31T12:34:56");
-    assert.equal(rawDb!.prepare("SELECT value FROM config WHERE key = 'end_time'").pluck().get(), "2026-08-31T12:34:56");
+    const startResult = await pool!.query("SELECT value FROM config WHERE key = 'start_time'");
+    const endResult = await pool!.query("SELECT value FROM config WHERE key = 'end_time'");
+    assert.equal(startResult.rows[0].value, "2026-08-31T12:34:56");
+    assert.equal(endResult.rows[0].value, "2026-08-31T12:34:56");
   });
 
   it("rejects a global start time after the deadline on the same day", async () => {
@@ -165,9 +190,8 @@ describe("grade and selection routes", () => {
   });
 
   it("removes selections that become ineligible after a student grade change", async () => {
-    rawDb!.prepare("INSERT INTO selections (user_id, course_id, created_at) VALUES (?, ?, ?)")
-      .run(2, 1, "2026-08-27T00:00:00");
-    rawDb!.prepare("UPDATE courses SET available_seats = 9 WHERE id = 1").run();
+    await pool!.query("INSERT INTO selections (user_id, course_id, created_at) VALUES ($1, $2, $3)", [2, 1, "2026-08-27T00:00:00"]);
+    await pool!.query("UPDATE courses SET available_seats = 9 WHERE id = 1");
 
     const admin = await login("admin", "123");
     const response = await fetch(`${baseUrl}/api/admin/users/2`, {
@@ -188,9 +212,12 @@ describe("grade and selection routes", () => {
     });
 
     assert.equal(response.status, 302);
-    assert.equal(rawDb!.prepare("SELECT grade FROM users WHERE id = 2").pluck().get(), 2025);
-    assert.equal(rawDb!.prepare("SELECT count(*) FROM selections WHERE user_id = 2").pluck().get(), 0);
-    assert.equal(rawDb!.prepare("SELECT available_seats FROM courses WHERE id = 1").pluck().get(), 10);
+    const gradeResult = await pool!.query("SELECT grade FROM users WHERE id = 2");
+    assert.equal(gradeResult.rows[0].grade, 2025);
+    const selectionCount = await pool!.query("SELECT count(*) FROM selections WHERE user_id = 2");
+    assert.equal(Number(selectionCount.rows[0].count), 0);
+    const seatResult = await pool!.query("SELECT available_seats FROM courses WHERE id = 1");
+    assert.equal(seatResult.rows[0].available_seats, 10);
   });
 
   it("creates accounts with duplicate nicknames but unique usernames and required grades", async () => {
@@ -215,8 +242,9 @@ describe("grade and selection routes", () => {
       assert.equal(response.status, 302);
     }
 
+    const result = await pool!.query("SELECT username, nickname, grade FROM users WHERE username LIKE 'student-%' ORDER BY username");
     assert.deepEqual(
-      rawDb!.prepare("SELECT username, nickname, grade FROM users WHERE username LIKE 'student-%' ORDER BY username").all(),
+      result.rows,
       [
         { username: "student-a", nickname: "同名学生", grade: 2026 },
         { username: "student-b", nickname: "同名学生", grade: 2026 },
@@ -225,16 +253,16 @@ describe("grade and selection routes", () => {
   });
 
   it("forces a student without a phone to complete the profile before accessing the system", async () => {
-    const original = rawDb!.prepare("SELECT nickname, password, grade, class_name, phone FROM users WHERE id = 2").get() as {
+    const originalResult = await pool!.query("SELECT nickname, password, grade, class_name, phone FROM users WHERE id = 2");
+    const original = originalResult.rows[0] as {
       nickname: string;
       password: string;
       grade: number;
       class_name: string | null;
       phone: string | null;
     };
-    rawDb!.prepare("UPDATE users SET phone = NULL, class_name = NULL WHERE id = 2").run();
-    rawDb!.prepare("INSERT INTO config (key, value) VALUES ('student_notice', ?)")
-      .run("请查看 https://example.com/notice。<script>alert('xss')</script>");
+    await pool!.query("UPDATE users SET phone = NULL, class_name = NULL WHERE id = 2");
+    await pool!.query("INSERT INTO config (key, value) VALUES ('student_notice', $1) ON CONFLICT(key) DO UPDATE SET value = excluded.value", ["请查看 https://example.com/notice。<script>alert('xss')</script>"]);
 
     try {
       const student = await login("student", "123");
@@ -328,7 +356,8 @@ describe("grade and selection routes", () => {
       assert.equal(saved.status, 302);
       assert.equal(saved.headers.get("location"), "/courses");
 
-      const updated = rawDb!.prepare("SELECT nickname, password, grade, class_name, phone FROM users WHERE id = 2").get() as {
+      const updatedResult = await pool!.query("SELECT nickname, password, grade, class_name, phone FROM users WHERE id = 2");
+      const updated = updatedResult.rows[0] as {
         nickname: string;
         password: string;
         grade: number;
@@ -355,9 +384,8 @@ describe("grade and selection routes", () => {
       assert.match(restoredHtml, /&lt;script&gt;alert\(&#39;xss&#39;\)&lt;\/script&gt;/);
       assert.doesNotMatch(restoredHtml, /href="https:\/\/example\.com\/notice。/);
     } finally {
-      rawDb!.prepare("UPDATE users SET nickname = ?, password = ?, grade = ?, class_name = ?, phone = ? WHERE id = 2")
-        .run(original.nickname, original.password, original.grade, original.class_name, original.phone);
-      rawDb!.prepare("DELETE FROM config WHERE key = 'student_notice'").run();
+      await pool!.query("UPDATE users SET nickname = $1, password = $2, grade = $3, class_name = $4, phone = $5 WHERE id = 2", [original.nickname, original.password, original.grade, original.class_name, original.phone]);
+      await pool!.query("DELETE FROM config WHERE key = 'student_notice'");
     }
   });
 
@@ -439,8 +467,9 @@ describe("grade and selection routes", () => {
       }),
     });
     assert.equal(saved.status, 302);
+    const result = await pool!.query("SELECT class_name, phone FROM users WHERE id = 2");
     assert.deepEqual(
-      rawDb!.prepare("SELECT class_name, phone FROM users WHERE id = 2").get(),
+      result.rows[0],
       { class_name: "2", phone: "13900139000" },
     );
 
@@ -455,10 +484,8 @@ describe("grade and selection routes", () => {
 
   it("finds every student sharing an exact nickname and shows profile fields", async () => {
     const password = bcryptjs.hashSync("123", 4);
-    rawDb!.prepare("INSERT INTO users (username, nickname, password, is_admin, grade, class_name, phone) VALUES (?, ?, ?, 0, ?, ?, ?)")
-      .run("same-nick-a", "同名<&查询", password, 2026, "1", "13700137000");
-    rawDb!.prepare("INSERT INTO users (username, nickname, password, is_admin, grade, class_name, phone) VALUES (?, ?, ?, 0, ?, ?, ?)")
-      .run("same-nick-b", "同名<&查询", password, 2027, "2", "13600136000");
+    await pool!.query("INSERT INTO users (username, nickname, password, is_admin, grade, class_name, phone) VALUES ($1, $2, $3, 0, $4, $5, $6)", ["same-nick-a", "同名<&查询", password, 2026, "1", "13700137000"]);
+    await pool!.query("INSERT INTO users (username, nickname, password, is_admin, grade, class_name, phone) VALUES ($1, $2, $3, 0, $4, $5, $6)", ["same-nick-b", "同名<&查询", password, 2027, "2", "13600136000"]);
 
     const admin = await login("admin", "123");
     const response = await fetch(`${baseUrl}/api/admin/users/search?keyword=${encodeURIComponent("同名<&查询")}`, {
@@ -476,7 +503,7 @@ describe("grade and selection routes", () => {
 
   it("limits course description previews to 100 characters on student and admin cards", async () => {
     const description = "A".repeat(100) + "TAIL";
-    rawDb!.prepare("UPDATE courses SET description = ? WHERE id = 1").run(description);
+    await pool!.query("UPDATE courses SET description = $1 WHERE id = 1", [description]);
 
     const student = await login("student", "123");
     const studentPage = await fetch(`${baseUrl}/courses`, { headers: { cookie: student.cookie } });
@@ -511,7 +538,8 @@ describe("grade and selection routes", () => {
         }),
       });
       assert.equal(saved.status, 302);
-      assert.equal(rawDb!.prepare("SELECT value FROM config WHERE key = 'student_notice'").pluck().get(), "新通知 https://example.com/help");
+      const noticeResult = await pool!.query("SELECT value FROM config WHERE key = 'student_notice'");
+      assert.equal(noticeResult.rows[0].value, "新通知 https://example.com/help");
 
       const student = await login("student", "123");
       const courses = await fetch(`${baseUrl}/courses`, { headers: { cookie: student.cookie } });
@@ -533,9 +561,10 @@ describe("grade and selection routes", () => {
         }),
       });
       assert.equal(cleared.status, 302);
-      assert.equal(rawDb!.prepare("SELECT value FROM config WHERE key = 'student_notice'").pluck().get(), "");
+      const clearedResult = await pool!.query("SELECT value FROM config WHERE key = 'student_notice'");
+      assert.equal(clearedResult.rows[0].value, "");
     } finally {
-      rawDb!.prepare("DELETE FROM config WHERE key = 'student_notice'").run();
+      await pool!.query("DELETE FROM config WHERE key = 'student_notice'");
     }
   });
 
@@ -561,7 +590,8 @@ describe("grade and selection routes", () => {
         }),
       });
       assert.equal(saved.status, 302);
-      assert.equal(rawDb!.prepare("SELECT value FROM config WHERE key = 'course_instructions'").pluck().get(), "第一行\n<script>第二行</script>");
+      const instructionsResult = await pool!.query("SELECT value FROM config WHERE key = 'course_instructions'");
+      assert.equal(instructionsResult.rows[0].value, "第一行\n<script>第二行</script>");
 
       const student = await login("student", "123");
       const courses = await fetch(`${baseUrl}/courses`, { headers: { cookie: student.cookie } });
@@ -572,7 +602,7 @@ describe("grade and selection routes", () => {
       assert.match(coursesHtml, /第一行\s*&lt;script&gt;第二行&lt;\/script&gt;/);
       assert.doesNotMatch(coursesHtml, /<script>第二行<\/script>/);
     } finally {
-      rawDb!.prepare("DELETE FROM config WHERE key = 'course_instructions'").run();
+      await pool!.query("DELETE FROM config WHERE key = 'course_instructions'");
     }
   });
 });
@@ -616,71 +646,4 @@ function extractCsrf(html: string): string {
   const match = html.match(/name="_csrf" value="([^"]+)"/);
   assert.ok(match);
   return match[1];
-}
-
-function createSchema() {
-  const sqlite = new Database("data/db.sqlite");
-  sqlite.exec(`
-    CREATE TABLE users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      username TEXT NOT NULL UNIQUE,
-      nickname TEXT NOT NULL,
-      password TEXT NOT NULL,
-      is_admin INTEGER NOT NULL DEFAULT 0,
-      grade INTEGER,
-      class_name TEXT,
-      phone TEXT
-    );
-    CREATE TABLE courses (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      teacher TEXT NOT NULL,
-      description TEXT,
-      course_time TEXT,
-      location TEXT,
-      total_seats INTEGER NOT NULL,
-      available_seats INTEGER NOT NULL,
-      open_time TEXT NOT NULL,
-      allowed_grades TEXT
-    );
-    CREATE TABLE access (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      course_id INTEGER NOT NULL REFERENCES courses(id),
-      open_time TEXT NOT NULL
-    );
-    CREATE TABLE access_users (
-      access_id INTEGER NOT NULL REFERENCES access(id),
-      user_id INTEGER NOT NULL REFERENCES users(id),
-      PRIMARY KEY (access_id, user_id)
-    );
-    CREATE TABLE selections (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL REFERENCES users(id),
-      course_id INTEGER NOT NULL REFERENCES courses(id),
-      created_at TEXT NOT NULL,
-      UNIQUE (user_id, course_id)
-    );
-    CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-  `);
-  sqlite.close();
-}
-
-function seedFixture(sqlite: Database.Database) {
-  const password = bcryptjs.hashSync("123", 4);
-  sqlite.prepare("INSERT INTO users (username, nickname, password, is_admin, grade, phone) VALUES (?, ?, ?, ?, ?, ?)")
-    .run("admin", "Admin Nickname", password, 1, null, null);
-  sqlite.prepare("INSERT INTO users (username, nickname, password, is_admin, grade, phone) VALUES (?, ?, ?, ?, ?, ?)")
-    .run("student", "Student Nickname", password, 0, 2026, "13800138000");
-  sqlite.prepare("INSERT INTO courses (name, teacher, total_seats, available_seats, open_time, allowed_grades) VALUES (?, ?, ?, ?, ?, ?)")
-    .run("Allowed course", "Teacher", 10, 10, "2999-01-01T00:00:00", "2026");
-  sqlite.prepare("INSERT INTO courses (name, teacher, total_seats, available_seats, open_time, allowed_grades) VALUES (?, ?, ?, ?, ?, ?)")
-    .run("Restricted course", "Teacher", 10, 10, "2000-01-01T00:00:00", "2025");
-  const later = sqlite.prepare("INSERT INTO access (course_id, open_time) VALUES (?, ?)").run(1, "2099-01-01T00:00:00").lastInsertRowid;
-  const earlier = sqlite.prepare("INSERT INTO access (course_id, open_time) VALUES (?, ?)").run(1, "2090-01-01T00:00:00").lastInsertRowid;
-  sqlite.prepare("INSERT INTO access_users (access_id, user_id) VALUES (?, ?)").run(later, 2);
-  sqlite.prepare("INSERT INTO access_users (access_id, user_id) VALUES (?, ?)").run(earlier, 2);
-  const setConfig = sqlite.prepare("INSERT INTO config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
-  setConfig.run("start_time", "2000-01-01T00:00:00");
-  setConfig.run("end_time", "2999-12-31T23:59:59");
-  setConfig.run("max_selections", "3");
 }

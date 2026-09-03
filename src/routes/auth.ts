@@ -6,28 +6,33 @@ import { eq } from "drizzle-orm";
 
 const router = Router();
 
-router.post("/api/login", (req: Request, res: Response) => {
-  const { username, password } = req.body;
+router.post("/api/login", async (req: Request, res: Response, next) => {
+  try {
+    const { username, password } = req.body;
 
-  if (!username || !password) {
-    return res.render("login", { error: "请输入用户名和密码", title: "登录" });
-  }
+    if (!username || !password) {
+      return res.render("login", { error: "请输入用户名和密码", title: "登录" });
+    }
 
-  const user = db.select().from(users).where(eq(users.username, username)).get();
+    const userRows = await db.select().from(users).where(eq(users.username, username));
+    const user = userRows[0];
 
-  if (!user || !bcryptjs.compareSync(password, user.password)) {
-    return res.render("login", { error: "用户名或密码错误", title: "登录" });
-  }
+    if (!user || !bcryptjs.compareSync(password, user.password)) {
+      return res.render("login", { error: "用户名或密码错误", title: "登录" });
+    }
 
-  req.session.regenerate((err) => {
-    if (err) return res.status(500).send("登录失败");
-    req.session.userId = user.id;
-    req.session.isAdmin = user.isAdmin;
-    req.session.save(() => {
-      const redirectTo = user.isAdmin ? "/admin/courses" : user.phone ? "/courses" : "/profile";
-      res.redirect(redirectTo);
+    req.session.regenerate((err) => {
+      if (err) return res.status(500).send("登录失败");
+      req.session.userId = user.id;
+      req.session.isAdmin = user.isAdmin;
+      req.session.save(() => {
+        const redirectTo = user.isAdmin ? "/admin/courses" : user.phone ? "/courses" : "/profile";
+        res.redirect(redirectTo);
+      });
     });
-  });
+  } catch (err) {
+    next(err);
+  }
 });
 
 router.post("/api/logout", (req: Request, res: Response) => {

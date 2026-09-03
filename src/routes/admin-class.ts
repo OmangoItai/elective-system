@@ -11,139 +11,144 @@ import { readMaxSelections } from "../services/selection-policy";
 
 const router = Router();
 
-router.get("/admin/class", requireAdmin, (_req: Request, res: Response) => {
-  const allStudents = db
-    .select({ id: users.id, username: users.username, nickname: users.nickname, grade: users.grade, className: users.className, phone: users.phone })
-    .from(users)
-    .where(eq(users.isAdmin, 0))
-    .all();
+router.get("/admin/class", requireAdmin, async (_req: Request, res: Response, next) => {
+  try {
+    const allStudents = await db
+      .select({ id: users.id, username: users.username, nickname: users.nickname, grade: users.grade, className: users.className, phone: users.phone })
+      .from(users)
+      .where(eq(users.isAdmin, 0));
 
-  const allCourses = db.select().from(courses).all();
+    const allCourses = await db.select().from(courses);
 
-  res.render("admin-class", {
-    title: "班级管理",
-    allStudents,
-    allStudentsJson: JSON.stringify(allStudents).replace(/</g, "\\u003c"),
-    allCourses,
-  });
+    res.render("admin-class", {
+      title: "班级管理",
+      allStudents,
+      allStudentsJson: JSON.stringify(allStudents).replace(/</g, "\\u003c"),
+      allCourses,
+    });
+  } catch (err) {
+    next(err);
+  }
 });
 
-router.get("/api/admin/class/courses/search", requireAdmin, (req: Request, res: Response) => {
-  const { name } = req.query;
-  if (!name || typeof name !== "string" || !name.trim()) {
-    return res.send(`<div class="px-6 py-4 text-sm text-gray-500">请输入课程名</div>`);
+router.get("/api/admin/class/courses/search", requireAdmin, async (req: Request, res: Response, next) => {
+  try {
+    const { name } = req.query;
+    if (!name || typeof name !== "string" || !name.trim()) {
+      return res.send(`<div class="px-6 py-4 text-sm text-gray-500">请输入课程名</div>`);
+    }
+
+    const courseRows = await db
+      .select()
+      .from(courses)
+      .where(eq(courses.name, name.trim()));
+
+    if (courseRows.length === 0) {
+      return res.send(
+        `<div class="px-6 py-4 text-sm text-red-500">未找到课程 "${escapeHtml(name.trim())}"</div>`
+      );
+    }
+    const course = courseRows[0];
+
+    const enrolledStudents = await db
+      .select({ id: users.id, username: users.username, nickname: users.nickname, grade: users.grade, className: users.className, phone: users.phone })
+      .from(selections)
+      .innerJoin(users, eq(selections.userId, users.id))
+      .where(eq(selections.courseId, course.id));
+
+    res.send(renderResult(course, enrolledStudents, res.locals.csrfToken));
+  } catch (err) {
+    next(err);
   }
-
-  const course = db
-    .select()
-    .from(courses)
-    .where(eq(courses.name, name.trim()))
-    .get();
-
-  if (!course) {
-    return res.send(
-      `<div class="px-6 py-4 text-sm text-red-500">未找到课程 "${escapeHtml(name.trim())}"</div>`
-    );
-  }
-
-  const enrolledStudents = db
-    .select({ id: users.id, username: users.username, nickname: users.nickname, grade: users.grade, className: users.className, phone: users.phone })
-    .from(selections)
-    .innerJoin(users, eq(selections.userId, users.id))
-    .where(eq(selections.courseId, course.id))
-    .all();
-
-  res.send(renderResult(course, enrolledStudents, res.locals.csrfToken));
 });
 
 router.put(
   "/api/admin/class/courses/:id/students",
   requireAdmin,
-  (req: Request, res: Response) => {
-    const courseId = parseRouteId(req.params.id);
-    if (courseId === null) return res.status(400).send("无效的课程ID");
-    const { user_ids } = req.body;
+  async (req: Request, res: Response, next) => {
+    try {
+      const courseId = parseRouteId(req.params.id);
+      if (courseId === null) return res.status(400).send("无效的课程ID");
+      const { user_ids } = req.body;
 
-    const course = db
-      .select()
-      .from(courses)
-      .where(eq(courses.id, courseId))
-      .get();
-    if (!course) return res.status(404).send("课程不存在");
+      const courseRows = await db
+        .select()
+        .from(courses)
+        .where(eq(courses.id, courseId));
+      if (courseRows.length === 0) return res.status(404).send("课程不存在");
+      const course = courseRows[0];
 
-    const rawIds = Array.isArray(user_ids) ? user_ids : user_ids ? [user_ids] : [];
-    if (rawIds.some((id: unknown) => !/^\d+$/.test(String(id)))) {
-      return res.status(400).send("名单中包含无效学生ID");
-    }
-    const ids = rawIds.map((id: unknown) => Number(id));
+      const rawIds = Array.isArray(user_ids) ? user_ids : user_ids ? [user_ids] : [];
+      if (rawIds.some((id: unknown) => !/^\d+$/.test(String(id)))) {
+        return res.status(400).send("名单中包含无效学生ID");
+      }
+      const ids = rawIds.map((id: unknown) => Number(id));
 
-    const uniqueIds = [...new Set(ids)];
+      const uniqueIds = [...new Set(ids)];
 
-    const validUsers = uniqueIds.length > 0
-      ? db.select({ id: users.id, grade: users.grade })
-          .from(users)
-          .where(and(eq(users.isAdmin, 0), inArray(users.id, uniqueIds)))
-          .all()
-      : [];
-    const validIds = validUsers.map((user) => user.id);
-    if (validIds.length !== uniqueIds.length) {
-      return res.status(400).send("名单中包含不存在或非学生账号");
-    }
-    if (validUsers.some((user) => !isGradeAllowed(user.grade, course.allowedGrades))) {
-      return res.status(400).send("名单中包含该课程不允许年级的学生");
-    }
+      const validUsers = uniqueIds.length > 0
+        ? await db.select({ id: users.id, grade: users.grade })
+            .from(users)
+            .where(and(eq(users.isAdmin, 0), inArray(users.id, uniqueIds)))
+        : [];
+      const validIds = validUsers.map((user) => user.id);
+      if (validIds.length !== uniqueIds.length) {
+        return res.status(400).send("名单中包含不存在或非学生账号");
+      }
+      if (validUsers.some((user) => !isGradeAllowed(user.grade, course.allowedGrades))) {
+        return res.status(400).send("名单中包含该课程不允许年级的学生");
+      }
 
-    if (validIds.length > course.totalSeats) {
-      return res
-        .status(400)
-        .send(
-          `名额不足，课程总名额 ${course.totalSeats}，当前提交 ${validIds.length} 人`
-        );
-    }
+      if (validIds.length > course.totalSeats) {
+        return res
+          .status(400)
+          .send(
+            `名额不足，课程总名额 ${course.totalSeats}，当前提交 ${validIds.length} 人`
+          );
+      }
 
-    const maxSelections = readMaxSelections(db);
-    for (const userId of validIds) {
-      const otherSelections = db.select({ id: selections.id })
+      const maxSelections = await readMaxSelections(db);
+      for (const userId of validIds) {
+        const otherSelections = await db.select({ id: selections.id })
+          .from(selections)
+          .where(and(eq(selections.userId, userId), ne(selections.courseId, courseId)));
+        if (otherSelections.length >= maxSelections) {
+          return res.status(400).send(`学生ID ${userId} 已达到最多 ${maxSelections} 门课限制`);
+        }
+      }
+
+      await db.transaction(async (tx) => {
+        await tx.delete(selections).where(eq(selections.courseId, courseId));
+
+        if (validIds.length > 0) {
+          const now = nowLocal();
+          await tx.insert(selections)
+            .values(
+              validIds.map((userId) => ({ userId, courseId, createdAt: now }))
+            );
+        }
+
+        await tx.update(courses)
+          .set({ availableSeats: course.totalSeats - validIds.length })
+          .where(eq(courses.id, courseId));
+      });
+
+      const updatedCourseRows = await db
+        .select()
+        .from(courses)
+        .where(eq(courses.id, courseId));
+      const updatedCourse = updatedCourseRows[0]!;
+
+      const enrolledStudents = await db
+        .select({ id: users.id, username: users.username, nickname: users.nickname, grade: users.grade, className: users.className, phone: users.phone })
         .from(selections)
-        .where(and(eq(selections.userId, userId), ne(selections.courseId, courseId)))
-        .all().length;
-      if (otherSelections >= maxSelections) {
-        return res.status(400).send(`学生ID ${userId} 已达到最多 ${maxSelections} 门课限制`);
-      }
+        .innerJoin(users, eq(selections.userId, users.id))
+        .where(eq(selections.courseId, courseId));
+
+      res.send(renderResult(updatedCourse, enrolledStudents, req.session.csrfToken!));
+    } catch (err) {
+      next(err);
     }
-
-    db.transaction((tx) => {
-      tx.delete(selections).where(eq(selections.courseId, courseId)).run();
-
-      if (validIds.length > 0) {
-        const now = nowLocal();
-        tx.insert(selections)
-          .values(
-            validIds.map((userId) => ({ userId, courseId, createdAt: now }))
-          )
-          .run();
-      }
-
-      tx.update(courses)
-        .set({ availableSeats: course.totalSeats - validIds.length })
-        .where(eq(courses.id, courseId))
-        .run();
-    });
-
-    const updatedCourse = db
-      .select()
-      .from(courses)
-      .where(eq(courses.id, courseId))
-      .get()!;
-
-    const enrolledStudents = db
-      .select({ id: users.id, username: users.username, nickname: users.nickname, grade: users.grade, className: users.className, phone: users.phone })
-      .from(selections)
-      .innerJoin(users, eq(selections.userId, users.id))
-      .where(eq(selections.courseId, courseId))
-      .all();
-
-    res.send(renderResult(updatedCourse, enrolledStudents, req.session.csrfToken!));
   }
 );
 

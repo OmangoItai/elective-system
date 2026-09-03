@@ -1,14 +1,12 @@
-import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
-import { mkdirSync } from "node:fs";
+import { Pool } from "pg";
+import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "./schema";
-import { migrate } from "./migrate";
 
-mkdirSync("data", { recursive: true });
-const sqlite = new Database("data/db.sqlite");
-sqlite.pragma("foreign_keys = ON");
-sqlite.pragma("journal_mode = WAL");
-migrate(sqlite);
+const connectionString = process.env.DATABASE_URL || "postgres://postgres:postgres@localhost:5432/elective";
 
-export const db = drizzle(sqlite, { schema });
-export const rawDb = sqlite;
+export const pool = new Pool({ connectionString });
+export const db = drizzle(pool, { schema });
+
+export async function closeDb(): Promise<void> {
+  await pool.end();
+}
