@@ -75,6 +75,20 @@ describe("grade and selection routes", () => {
     }
   });
 
+  it("hides seat counts for courses that have not opened", async () => {
+    rawDb!.prepare("UPDATE config SET value = ? WHERE key = 'start_time'").run("2100-01-01T00:00:00");
+    try {
+      const student = await login("student", "123");
+      const html = await (await fetch(`${baseUrl}/courses`, { headers: { cookie: student.cookie } })).text();
+
+      assert.match(html, /等待开放/);
+      assert.doesNotMatch(html, /名额/);
+      assert.doesNotMatch(html, />10\s*\/\s*10</);
+    } finally {
+      rawDb!.prepare("UPDATE config SET value = ? WHERE key = 'start_time'").run("2000-01-01T00:00:00");
+    }
+  });
+
   it("never opens later than the global start, even with a later batch", async () => {
     rawDb!.prepare("UPDATE config SET value = ? WHERE key = 'start_time'").run("2085-01-01T00:00:00");
     try {
