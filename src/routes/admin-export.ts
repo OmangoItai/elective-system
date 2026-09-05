@@ -3,14 +3,16 @@ import { sql } from "drizzle-orm";
 import { db } from "../db/index";
 import { requireAdmin } from "../middleware/auth";
 import { nowLocal } from "../utils/time";
-import { csvDocument, CSV_BOM } from "../utils/export-csv";
+import { csvDocument, csvIdCell, CSV_BOM } from "../utils/export-csv";
 import { buildZip } from "../utils/zip-store";
 
 const router = Router();
 
-/** China-local date as YYYYMMDD for export file names. */
+/** China-local date as YYYY年MM月DD日 for export file names and CSV headers. */
 function exportDateStamp(): string {
-  return nowLocal().slice(0, 10).replace(/-/g, "");
+  const date = nowLocal().slice(0, 10);
+  const [year, month, day] = date.split("-");
+  return `${year}年${month}月${day}日`;
 }
 
 function sendBuffer(res: Response, name: string, data: Buffer, contentType: string) {
@@ -35,7 +37,7 @@ const STUDENT_FIELDS = ["学生姓名", "年级", "班级", "联系方式", "账
 function studentsWithClassRows(students: RosterStudent[]): unknown[][] {
   return [
     STUDENT_FIELDS,
-    ...students.map((s) => [s.nickname, s.grade, s.className, s.phone, s.username]),
+    ...students.map((s) => [s.nickname, s.grade, s.className, s.phone, csvIdCell(s.username)]),
   ];
 }
 
@@ -67,7 +69,7 @@ router.get("/api/admin/export/class-rosters", requireAdmin, (_req: Request, res:
     const csv = csvDocument([
       [`${cls.grade}年级${cls.class_name}班`, stamp],
       ["学生姓名", "课程名", "课程教师", "课程地点", "联系方式", "账号"],
-      ...rows.map((r) => [r.nickname, r.courseName, r.courseTeacher, r.courseLocation, r.phone, r.username]),
+      ...rows.map((r) => [r.nickname, r.courseName, r.courseTeacher, r.courseLocation, r.phone, csvIdCell(r.username)]),
     ]);
     return {
       name: `${cls.grade}年级${cls.class_name}班选课表-${stamp}.csv`,

@@ -688,28 +688,32 @@ describe("admin data export", () => {
   });
 
   it("exports one CSV per grade class zipped for 行政班级", async () => {
-    const usernames = ["exp-a1", "exp-a2", "exp-a3"];
+    const usernames = ["exp-a1", "exp-a2", "exp-a3", "202401"];
     const idA1 = addExportStudent("exp-a1", "张三", 2026, "1", "13800000001");
     addExportStudent("exp-a2", "李四", 2026, "1", null);
     addExportStudent("exp-a3", "王五", 2025, "2", "13800000003");
+    addExportStudent("202401", "陈八", 2026, "1", null);
     rawDb!.prepare("INSERT INTO selections (user_id, course_id, created_at) VALUES (?, 1, '2026-09-05T20:00:00')").run(idA1);
     try {
       const admin = await login("admin", "123");
       const response = await fetch(`${baseUrl}/api/admin/export/class-rosters`, { headers: { cookie: admin.cookie } });
       assert.equal(response.status, 200);
       assert.match(response.headers.get("content-type") || "", /application\/zip/);
-      assert.match(decodeURIComponent(response.headers.get("content-disposition") || ""), /行政班级选课表-\d{8}\.zip/);
+      assert.match(decodeURIComponent(response.headers.get("content-disposition") || ""), /行政班级选课表-\d{4}年\d{2}月\d{2}日\.zip/);
 
       const buffer = Buffer.from(await response.arrayBuffer());
       assert.equal(buffer.subarray(0, 2).toString("latin1"), "PK");
       const text = buffer.toString("utf8");
-      assert.match(text, /2026年级1班选课表-\d{8}\.csv/);
-      assert.match(text, /2025年级2班选课表-\d{8}\.csv/);
+      assert.match(text, /2026年级1班选课表-\d{4}年\d{2}月\d{2}日\.csv/);
+      assert.match(text, /2025年级2班选课表-\d{4}年\d{2}月\d{2}日\.csv/);
+      assert.ok(text.includes("sep=,"));
       assert.ok(text.includes("学生姓名,课程名,课程教师,课程地点,联系方式,账号"));
       // 有选课的学生：课程字段填上
       assert.ok(text.includes("张三,Allowed course,Teacher,,13800000001,exp-a1"));
       // 没选课的学生保留一行，课程字段留空
       assert.ok(text.includes("李四,,,,,exp-a2"));
+      // 纯数字账号前加单引号，防止 Excel 转浮点
+      assert.ok(text.includes("陈八,,,,,'202401"));
       assert.ok(text.includes("王五"));
       assert.ok(text.includes("\ufeff"));
     } finally {
@@ -730,14 +734,14 @@ describe("admin data export", () => {
       const response = await fetch(`${baseUrl}/api/admin/export/course-rosters`, { headers: { cookie: admin.cookie } });
       assert.equal(response.status, 200);
       assert.match(response.headers.get("content-type") || "", /application\/zip/);
-      assert.match(decodeURIComponent(response.headers.get("content-disposition") || ""), /社团班级选课表-\d{8}\.zip/);
+      assert.match(decodeURIComponent(response.headers.get("content-disposition") || ""), /社团班级选课表-\d{4}年\d{2}月\d{2}日\.zip/);
 
       const buffer = Buffer.from(await response.arrayBuffer());
       assert.equal(buffer.subarray(0, 2).toString("latin1"), "PK");
       const text = buffer.toString("utf8");
-      assert.match(text, /Allowed course选课表-\d{8}\.csv/);
-      assert.match(text, new RegExp(`Allowed course\\(ID${dupCourseId}\\)选课表-\\d{8}\\.csv`));
-      assert.match(text, /Restricted course选课表-\d{8}\.csv/);
+      assert.match(text, /Allowed course选课表-\d{4}年\d{2}月\d{2}日\.csv/);
+      assert.match(text, new RegExp(`Allowed course\\(ID${dupCourseId}\\)选课表-\\d{4}年\\d{2}月\\d{2}日\\.csv`));
+      assert.match(text, /Restricted course选课表-\d{4}年\d{2}月\d{2}日\.csv/);
       assert.ok(text.includes("赵六,2026,3,"));
     } finally {
       rawDb!.prepare("DELETE FROM selections WHERE course_id = ?").run(dupCourseId);
@@ -754,7 +758,7 @@ describe("admin data export", () => {
       const response = await fetch(`${baseUrl}/api/admin/export/unselected`, { headers: { cookie: admin.cookie } });
       assert.equal(response.status, 200);
       assert.match(response.headers.get("content-type") || "", /text\/csv/);
-      assert.match(decodeURIComponent(response.headers.get("content-disposition") || ""), /未选课学生表-\d{8}\.csv/);
+      assert.match(decodeURIComponent(response.headers.get("content-disposition") || ""), /未选课学生表-\d{4}年\d{2}月\d{2}日\.csv/);
 
       const buffer = Buffer.from(await response.arrayBuffer());
       assert.deepEqual([...buffer.subarray(0, 3)], [0xef, 0xbb, 0xbf]);
