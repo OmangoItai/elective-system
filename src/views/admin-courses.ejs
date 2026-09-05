@@ -97,6 +97,27 @@
 
 <h2 class="text-2xl font-bold text-gray-900 mb-4">课程列表</h2>
 
+<div class="mb-6 bg-white rounded-xl shadow-sm border border-gray-100 p-4 flex flex-col gap-2 sm:flex-row sm:items-center">
+  <label for="export-target" class="text-sm font-medium text-gray-700 shrink-0">导出数据</label>
+  <select id="export-target"
+    class="rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 sm:w-56">
+    <option value="class-rosters">行政班级</option>
+    <option value="course-rosters">社团班级</option>
+    <option value="unselected">未选课学生</option>
+  </select>
+  <button type="button" id="export-button"
+    class="inline-flex items-center justify-center text-sm font-medium rounded-lg px-4 py-2 bg-blue-600 text-white hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-colors whitespace-nowrap">
+    导出数据
+  </button>
+</div>
+
+<script>
+  document.getElementById('export-button').addEventListener('click', function () {
+    var target = document.getElementById('export-target').value;
+    window.location.href = '/api/admin/export/' + target;
+  });
+</script>
+
 <details class="mb-6 bg-white rounded-xl shadow-sm border border-gray-100">
   <summary class="px-6 py-3 cursor-pointer text-sm font-medium text-gray-700 hover:text-gray-900 select-none">+ 新建课程</summary>
   <form method="POST" action="/api/admin/courses" class="px-6 pb-4">

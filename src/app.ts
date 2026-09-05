@@ -11,6 +11,7 @@ import { BetterSqlite3Store } from "./lib/session-store";
 import adminAccessRouter from "./routes/admin-access";
 import adminClassRouter from "./routes/admin-class";
 import adminCoursesRouter from "./routes/admin-courses";
+import adminExportRouter from "./routes/admin-export";
 import adminUsersRouter from "./routes/admin-users";
 import authRouter from "./routes/auth";
 import coursesRouter from "./routes/courses";
@@ -107,6 +108,7 @@ export function createApp() {
   app.use("/", adminAccessRouter);
   app.use("/", adminUsersRouter);
   app.use("/", adminClassRouter);
+  app.use("/", adminExportRouter);
   return app;
 }
 
