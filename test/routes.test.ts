@@ -655,6 +655,115 @@ describe("grade and selection routes", () => {
   });
 });
 
+describe("admin data export", () => {
+  function addExportStudent(username: string, nickname: string, grade: number, className: string | null, phone: string | null): number {
+    const password = bcryptjs.hashSync("123", 4);
+    const info = rawDb!
+      .prepare("INSERT INTO users (username, nickname, password, is_admin, grade, class_name, phone) VALUES (?, ?, ?, 0, ?, ?, ?)")
+      .run(username, nickname, password, grade, className, phone);
+    return Number(info.lastInsertRowid);
+  }
+
+  function cleanup(usernames: string[]) {
+    const placeholders = usernames.map(() => "?").join(",");
+    const ids = rawDb!
+      .prepare(`SELECT id FROM users WHERE username IN (${placeholders})`)
+      .all(...usernames) as { id: number }[];
+    if (ids.length > 0) {
+      rawDb!.prepare(`DELETE FROM selections WHERE user_id IN (${ids.map(() => "?").join(",")})`).run(...ids.map((r) => r.id));
+    }
+    rawDb!.prepare(`DELETE FROM users WHERE username IN (${placeholders})`).run(...usernames);
+  }
+
+  it("requires an admin session for every export endpoint", async () => {
+    for (const path of ["/api/admin/export/class-rosters", "/api/admin/export/course-rosters", "/api/admin/export/unselected"]) {
+      const anonymous = await fetch(`${baseUrl}${path}`, { redirect: "manual" });
+      assert.equal(anonymous.status, 302);
+      assert.equal(anonymous.headers.get("location"), "/login");
+
+      const student = await login("student", "123");
+      const forbidden = await fetch(`${baseUrl}${path}`, { redirect: "manual", headers: { cookie: student.cookie } });
+      assert.equal(forbidden.status, 302);
+    }
+  });
+
+  it("exports one CSV per grade class zipped for 行政班级", async () => {
+    const usernames = ["exp-a1", "exp-a2", "exp-a3"];
+    addExportStudent("exp-a1", "张三", 2026, "1", "13800000001");
+    addExportStudent("exp-a2", "李四", 2026, "1", null);
+    addExportStudent("exp-a3", "王五", 2025, "2", "13800000003");
+    try {
+      const admin = await login("admin", "123");
+      const response = await fetch(`${baseUrl}/api/admin/export/class-rosters`, { headers: { cookie: admin.cookie } });
+      assert.equal(response.status, 200);
+      assert.match(response.headers.get("content-type") || "", /application\/zip/);
+      assert.match(decodeURIComponent(response.headers.get("content-disposition") || ""), /行政班级选课表-\d{8}\.zip/);
+
+      const buffer = Buffer.from(await response.arrayBuffer());
+      assert.equal(buffer.subarray(0, 2).toString("latin1"), "PK");
+      const text = buffer.toString("utf8");
+      assert.match(text, /2026年级1班选课表-\d{8}\.csv/);
+      assert.match(text, /2025年级2班选课表-\d{8}\.csv/);
+      assert.ok(text.includes("张三"));
+      assert.ok(text.includes("13800000001"));
+      assert.ok(text.includes("王五"));
+      assert.ok(text.includes("\ufeff"));
+    } finally {
+      cleanup(usernames);
+    }
+  });
+
+  it("exports one CSV per course zipped for 社团班级", async () => {
+    const usernames = ["exp-b1"];
+    const userId = addExportStudent("exp-b1", "赵六", 2026, "3", "13800000006");
+    rawDb!.prepare("INSERT INTO selections (user_id, course_id, created_at) VALUES (?, 1, '2026-09-05T20:00:00')").run(userId);
+    const dupCourseId = Number(
+      rawDb!.prepare("INSERT INTO courses (name, teacher, total_seats, available_seats) VALUES ('Allowed course', 'Another', 10, 10)").run()
+        .lastInsertRowid,
+    );
+    try {
+      const admin = await login("admin", "123");
+      const response = await fetch(`${baseUrl}/api/admin/export/course-rosters`, { headers: { cookie: admin.cookie } });
+      assert.equal(response.status, 200);
+      assert.match(response.headers.get("content-type") || "", /application\/zip/);
+      assert.match(decodeURIComponent(response.headers.get("content-disposition") || ""), /社团班级选课表-\d{8}\.zip/);
+
+      const buffer = Buffer.from(await response.arrayBuffer());
+      assert.equal(buffer.subarray(0, 2).toString("latin1"), "PK");
+      const text = buffer.toString("utf8");
+      assert.match(text, /Allowed course选课表-\d{8}\.csv/);
+      assert.match(text, new RegExp(`Allowed course\\(ID${dupCourseId}\\)选课表-\\d{8}\\.csv`));
+      assert.match(text, /Restricted course选课表-\d{8}\.csv/);
+      assert.ok(text.includes("赵六,2026,3,"));
+    } finally {
+      rawDb!.prepare("DELETE FROM selections WHERE course_id = ?").run(dupCourseId);
+      rawDb!.prepare("DELETE FROM courses WHERE id = ?").run(dupCourseId);
+      cleanup(usernames);
+    }
+  });
+
+  it("exports a single CSV of students without any selection", async () => {
+    const usernames = ["exp-c1"];
+    addExportStudent("exp-c1", "钱七", 2026, "1", null);
+    try {
+      const admin = await login("admin", "123");
+      const response = await fetch(`${baseUrl}/api/admin/export/unselected`, { headers: { cookie: admin.cookie } });
+      assert.equal(response.status, 200);
+      assert.match(response.headers.get("content-type") || "", /text\/csv/);
+      assert.match(decodeURIComponent(response.headers.get("content-disposition") || ""), /未选课学生表-\d{8}\.csv/);
+
+      const buffer = Buffer.from(await response.arrayBuffer());
+      assert.deepEqual([...buffer.subarray(0, 3)], [0xef, 0xbb, 0xbf]);
+      const text = buffer.toString("utf8");
+      assert.ok(text.includes("钱七,2026,1,"));
+      // admins must never appear in the student export
+      assert.ok(!text.includes("Admin Nickname"));
+    } finally {
+      cleanup(usernames);
+    }
+  });
+});
+
 async function login(username: string, password: string): Promise<{ cookie: string; csrf: string; redirect: string | null }> {
   const page = await fetch(`${baseUrl}/login`);
   const initialCookie = cookieValue(page.headers.get("set-cookie"));
