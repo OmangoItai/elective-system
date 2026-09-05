@@ -8,13 +8,14 @@ export function csvCell(value: unknown): string {
 }
 
 /**
- * Cell for identifier columns (账号/身份证号). Excel converts long digit
- * strings to floats/scientific notation, so pure-digit values get a leading
- * apostrophe, which Excel treats as a text marker and does not display.
+ * Cell for identifier columns (账号/身份证号). Values get a leading
+ * apostrophe, which Excel treats as a text marker and does not display; it
+ * prevents long digit strings (身份证号) from becoming floats or scientific
+ * notation and keeps X-ending IDs visually consistent.
  */
 export function csvIdCell(value: unknown): string {
   const text = value == null ? "" : String(value);
-  return /^\d+$/.test(text) ? "'" + text : text;
+  return text ? "'" + text : text;
 }
 
 export function csvRow(values: unknown[]): string {

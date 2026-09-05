@@ -688,11 +688,12 @@ describe("admin data export", () => {
   });
 
   it("exports one CSV per grade class zipped for 行政班级", async () => {
-    const usernames = ["exp-a1", "exp-a2", "exp-a3", "202401"];
+    const usernames = ["exp-a1", "exp-a2", "exp-a3", "202401", "202401X"];
     const idA1 = addExportStudent("exp-a1", "张三", 2026, "1", "13800000001");
     addExportStudent("exp-a2", "李四", 2026, "1", null);
     addExportStudent("exp-a3", "王五", 2025, "2", "13800000003");
     addExportStudent("202401", "陈八", 2026, "1", null);
+    addExportStudent("202401X", "王九", 2026, "1", null);
     rawDb!.prepare("INSERT INTO selections (user_id, course_id, created_at) VALUES (?, 1, '2026-09-05T20:00:00')").run(idA1);
     try {
       const admin = await login("admin", "123");
@@ -709,11 +710,12 @@ describe("admin data export", () => {
       assert.ok(text.includes("sep=,"));
       assert.ok(text.includes("学生姓名,课程名,课程教师,课程地点,联系方式,账号"));
       // 有选课的学生：课程字段填上
-      assert.ok(text.includes("张三,Allowed course,Teacher,,13800000001,exp-a1"));
+      assert.ok(text.includes("张三,Allowed course,Teacher,,13800000001,'exp-a1"));
       // 没选课的学生保留一行，课程字段留空
-      assert.ok(text.includes("李四,,,,,exp-a2"));
-      // 纯数字账号前加单引号，防止 Excel 转浮点
+      assert.ok(text.includes("李四,,,,,'exp-a2"));
+      // 所有账号前加单引号（Excel 文本标记，不显示）：纯数字防转浮点，X 结尾统一格式
       assert.ok(text.includes("陈八,,,,,'202401"));
+      assert.ok(text.includes("王九,,,,,'202401X"));
       assert.ok(text.includes("王五"));
       assert.ok(text.includes("\ufeff"));
     } finally {
