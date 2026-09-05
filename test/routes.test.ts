@@ -687,16 +687,37 @@ describe("admin data export", () => {
     }
   });
 
-  it("exports one CSV per grade class zipped for 行政班级", async () => {
-    const usernames = ["exp-a1", "exp-a2", "exp-a3", "202401"];
+  it("exports one sheet per grade class as xlsx by default, csv zip on demand, for 行政班级", async () => {
+    const usernames = ["exp-a1", "exp-a2", "exp-a3", "202401", "202401X"];
     const idA1 = addExportStudent("exp-a1", "张三", 2026, "1", "13800000001");
     addExportStudent("exp-a2", "李四", 2026, "1", null);
     addExportStudent("exp-a3", "王五", 2025, "2", "13800000003");
     addExportStudent("202401", "陈八", 2026, "1", null);
+    addExportStudent("202401X", "王九", 2026, "1", null);
     rawDb!.prepare("INSERT INTO selections (user_id, course_id, created_at) VALUES (?, 1, '2026-09-05T20:00:00')").run(idA1);
     try {
       const admin = await login("admin", "123");
-      const response = await fetch(`${baseUrl}/api/admin/export/class-rosters`, { headers: { cookie: admin.cookie } });
+
+      // 默认 xlsx：单文件、每班一个 sheet，单元格为原生文本（无单引号、无浮点）
+      const xlsxResponse = await fetch(`${baseUrl}/api/admin/export/class-rosters`, { headers: { cookie: admin.cookie } });
+      assert.equal(xlsxResponse.status, 200);
+      assert.match(xlsxResponse.headers.get("content-type") || "", /spreadsheetml/);
+      assert.match(decodeURIComponent(xlsxResponse.headers.get("content-disposition") || ""), /行政班级选课表-\d{4}年\d{2}月\d{2}日\.xlsx/);
+      const xlsxBuffer = Buffer.from(await xlsxResponse.arrayBuffer());
+      assert.equal(xlsxBuffer.subarray(0, 2).toString("latin1"), "PK");
+      const xlsxText = xlsxBuffer.toString("utf8");
+      assert.ok(xlsxText.includes("[Content_Types].xml"));
+      assert.ok(xlsxText.includes("xl/workbook.xml"));
+      assert.ok(xlsxText.includes("2026年级1班"));
+      assert.ok(xlsxText.includes("2025年级2班"));
+      assert.ok(xlsxText.includes("学生姓名"));
+      assert.ok(xlsxText.includes("张三"));
+      assert.ok(xlsxText.includes("exp-a1"));
+      assert.ok(xlsxText.includes("202401X"));
+      assert.ok(!xlsxText.includes("'202401"));
+
+      // format=csv：每班一个 CSV 打 zip，账号列不加单引号
+      const response = await fetch(`${baseUrl}/api/admin/export/class-rosters?format=csv`, { headers: { cookie: admin.cookie } });
       assert.equal(response.status, 200);
       assert.match(response.headers.get("content-type") || "", /application\/zip/);
       assert.match(decodeURIComponent(response.headers.get("content-disposition") || ""), /行政班级选课表-\d{4}年\d{2}月\d{2}日\.zip/);
@@ -712,8 +733,9 @@ describe("admin data export", () => {
       assert.ok(text.includes("张三,Allowed course,Teacher,,13800000001,exp-a1"));
       // 没选课的学生保留一行，课程字段留空
       assert.ok(text.includes("李四,,,,,exp-a2"));
-      // 纯数字账号前加单引号，防止 Excel 转浮点
-      assert.ok(text.includes("陈八,,,,,'202401"));
+      // 账号列不加单引号（默认格式是 xlsx，csv 保持原值）
+      assert.ok(text.includes("陈八,,,,,202401"));
+      assert.ok(text.includes("王九,,,,,202401X"));
       assert.ok(text.includes("王五"));
       assert.ok(text.includes("\ufeff"));
     } finally {
@@ -721,7 +743,7 @@ describe("admin data export", () => {
     }
   });
 
-  it("exports one CSV per course zipped for 社团班级", async () => {
+  it("exports one sheet per course as xlsx by default, csv zip on demand, for 社团班级", async () => {
     const usernames = ["exp-b1"];
     const userId = addExportStudent("exp-b1", "赵六", 2026, "3", "13800000006");
     rawDb!.prepare("INSERT INTO selections (user_id, course_id, created_at) VALUES (?, 1, '2026-09-05T20:00:00')").run(userId);
@@ -731,7 +753,23 @@ describe("admin data export", () => {
     );
     try {
       const admin = await login("admin", "123");
-      const response = await fetch(`${baseUrl}/api/admin/export/course-rosters`, { headers: { cookie: admin.cookie } });
+
+      // 默认 xlsx：单文件、每门课程一个 sheet（同名课程 sheet 名自动消歧）
+      const xlsxResponse = await fetch(`${baseUrl}/api/admin/export/course-rosters`, { headers: { cookie: admin.cookie } });
+      assert.equal(xlsxResponse.status, 200);
+      assert.match(xlsxResponse.headers.get("content-type") || "", /spreadsheetml/);
+      assert.match(decodeURIComponent(xlsxResponse.headers.get("content-disposition") || ""), /社团班级选课表-\d{4}年\d{2}月\d{2}日\.xlsx/);
+      const xlsxBuffer = Buffer.from(await xlsxResponse.arrayBuffer());
+      assert.equal(xlsxBuffer.subarray(0, 2).toString("latin1"), "PK");
+      const xlsxText = xlsxBuffer.toString("utf8");
+      assert.ok(xlsxText.includes("Allowed course"));
+      assert.ok(xlsxText.includes("Allowed course(2)"));
+      assert.ok(xlsxText.includes("Restricted course"));
+      assert.ok(xlsxText.includes("赵六"));
+      assert.ok(xlsxText.includes("exp-b1"));
+
+      // format=csv：每门课程一个 CSV 打 zip，同名课程文件名按 ID 消歧
+      const response = await fetch(`${baseUrl}/api/admin/export/course-rosters?format=csv`, { headers: { cookie: admin.cookie } });
       assert.equal(response.status, 200);
       assert.match(response.headers.get("content-type") || "", /application\/zip/);
       assert.match(decodeURIComponent(response.headers.get("content-disposition") || ""), /社团班级选课表-\d{4}年\d{2}月\d{2}日\.zip/);
@@ -742,7 +780,7 @@ describe("admin data export", () => {
       assert.match(text, /Allowed course选课表-\d{4}年\d{2}月\d{2}日\.csv/);
       assert.match(text, new RegExp(`Allowed course\\(ID${dupCourseId}\\)选课表-\\d{4}年\\d{2}月\\d{2}日\\.csv`));
       assert.match(text, /Restricted course选课表-\d{4}年\d{2}月\d{2}日\.csv/);
-      assert.ok(text.includes("赵六,2026,3,"));
+      assert.ok(text.includes("赵六,2026,3,13800000006,exp-b1"));
     } finally {
       rawDb!.prepare("DELETE FROM selections WHERE course_id = ?").run(dupCourseId);
       rawDb!.prepare("DELETE FROM courses WHERE id = ?").run(dupCourseId);
@@ -750,12 +788,27 @@ describe("admin data export", () => {
     }
   });
 
-  it("exports a single CSV of students without any selection", async () => {
+  it("exports students without any selection as xlsx by default, single csv on demand", async () => {
     const usernames = ["exp-c1"];
     addExportStudent("exp-c1", "钱七", 2026, "1", null);
     try {
       const admin = await login("admin", "123");
-      const response = await fetch(`${baseUrl}/api/admin/export/unselected`, { headers: { cookie: admin.cookie } });
+
+      // 默认 xlsx：单文件单 sheet
+      const xlsxResponse = await fetch(`${baseUrl}/api/admin/export/unselected`, { headers: { cookie: admin.cookie } });
+      assert.equal(xlsxResponse.status, 200);
+      assert.match(xlsxResponse.headers.get("content-type") || "", /spreadsheetml/);
+      assert.match(decodeURIComponent(xlsxResponse.headers.get("content-disposition") || ""), /未选课学生表-\d{4}年\d{2}月\d{2}日\.xlsx/);
+      const xlsxBuffer = Buffer.from(await xlsxResponse.arrayBuffer());
+      assert.equal(xlsxBuffer.subarray(0, 2).toString("latin1"), "PK");
+      const xlsxText = xlsxBuffer.toString("utf8");
+      assert.ok(xlsxText.includes("未选课学生"));
+      assert.ok(xlsxText.includes("钱七"));
+      // admins must never appear in the student export
+      assert.ok(!xlsxText.includes("Admin Nickname"));
+
+      // format=csv：带 BOM 的单 CSV
+      const response = await fetch(`${baseUrl}/api/admin/export/unselected?format=csv`, { headers: { cookie: admin.cookie } });
       assert.equal(response.status, 200);
       assert.match(response.headers.get("content-type") || "", /text\/csv/);
       assert.match(decodeURIComponent(response.headers.get("content-disposition") || ""), /未选课学生表-\d{4}年\d{2}月\d{2}日\.csv/);
