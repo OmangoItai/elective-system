@@ -39,7 +39,7 @@ function studentsWithClassRows(students: RosterStudent[]): unknown[][] {
   ];
 }
 
-// 行政班级：每个年级每个班一个 CSV，打进一个压缩包
+// 行政班级：每个年级每个班一个 CSV（每行 = 学生 × 已选课程），打进一个压缩包
 router.get("/api/admin/export/class-rosters", requireAdmin, (_req: Request, res: Response) => {
   const classes = db.all(
     sql`SELECT DISTINCT grade, class_name FROM users
@@ -49,15 +49,25 @@ router.get("/api/admin/export/class-rosters", requireAdmin, (_req: Request, res:
 
   const stamp = exportDateStamp();
   const entries = classes.map((cls) => {
-    const students = db.all(
-      sql`SELECT nickname, grade, class_name AS className, phone, username FROM users
-          WHERE is_admin = 0 AND grade = ${cls.grade} AND class_name = ${cls.class_name}
-          ORDER BY id`,
-    ) as RosterStudent[];
+    const rows = db.all(
+      sql`SELECT u.nickname, u.phone, u.username, c.name AS courseName, c.teacher AS courseTeacher, c.location AS courseLocation
+          FROM users u
+          LEFT JOIN selections s ON s.user_id = u.id
+          LEFT JOIN courses c ON c.id = s.course_id
+          WHERE u.is_admin = 0 AND u.grade = ${cls.grade} AND u.class_name = ${cls.class_name}
+          ORDER BY u.id, c.id`,
+    ) as {
+      nickname: string;
+      phone: string | null;
+      username: string;
+      courseName: string | null;
+      courseTeacher: string | null;
+      courseLocation: string | null;
+    }[];
     const csv = csvDocument([
       [`${cls.grade}年级${cls.class_name}班`, stamp],
-      ["学生姓名", "联系方式", "账号"],
-      ...students.map((s) => [s.nickname, s.phone, s.username]),
+      ["学生姓名", "课程名", "课程教师", "课程地点", "联系方式", "账号"],
+      ...rows.map((r) => [r.nickname, r.courseName, r.courseTeacher, r.courseLocation, r.phone, r.username]),
     ]);
     return {
       name: `${cls.grade}年级${cls.class_name}班选课表-${stamp}.csv`,
