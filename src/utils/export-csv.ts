@@ -7,13 +7,26 @@ export function csvCell(value: unknown): string {
   return text;
 }
 
+/**
+ * Cell for identifier columns (账号/身份证号). Excel converts long digit
+ * strings to floats/scientific notation, so pure-digit values get a leading
+ * apostrophe, which Excel treats as a text marker and does not display.
+ */
+export function csvIdCell(value: unknown): string {
+  const text = value == null ? "" : String(value);
+  return /^\d+$/.test(text) ? "'" + text : text;
+}
+
 export function csvRow(values: unknown[]): string {
   return values.map(csvCell).join(",");
 }
 
-/** Join rows into a CSV document. Caller adds the UTF-8 BOM when writing. */
+/**
+ * Join rows into a CSV document with an explicit `sep=,` delimiter
+ * declaration (Excel convention). Caller adds the UTF-8 BOM when writing.
+ */
 export function csvDocument(rows: unknown[][]): string {
-  return rows.map(csvRow).join("\r\n") + "\r\n";
+  return "sep=,\r\n" + rows.map(csvRow).join("\r\n") + "\r\n";
 }
 
 /** UTF-8 BOM so Excel opens Chinese CSVs with the right encoding. */
